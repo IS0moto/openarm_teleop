@@ -224,14 +224,17 @@ int main(int argc, char** argv) {
         bool has_r = state_buffer_r.get_latest(target_r);
         bool has_l = state_buffer_l.get_latest(target_l);
         double gap_r = 0, gap_l = 0;
-        uint64_t now_ns = utils::now_ns();
 
         if (has_r) {
-            gap_r = (now_ns - state_buffer_r.get_last_receive_time_ns()) / 1e6;
+            uint64_t now_r = utils::now_ns();
+            uint64_t last_r = state_buffer_r.get_last_receive_time_ns();
+            gap_r = (now_r >= last_r) ? (now_r - last_r) / 1e6 : 0.0;
             safety_mgr_r->update(target_r, gap_r);
         }
         if (has_l) {
-            gap_l = (now_ns - state_buffer_l.get_last_receive_time_ns()) / 1e6;
+            uint64_t now_l = utils::now_ns();
+            uint64_t last_l = state_buffer_l.get_last_receive_time_ns();
+            gap_l = (now_l >= last_l) ? (now_l - last_l) / 1e6 : 0.0;
             safety_mgr_l->update(target_l, gap_l);
         }
 
