@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
     uint16_t left_port = 50001;
     double rate_hz = 500.0;
     bool mock = false;
+    std::string bind_ip = "0.0.0.0";
     std::string right_urdf = "urdf/openarm_right.urdf";
     std::string left_urdf = "urdf/openarm_left.urdf";
     
@@ -63,6 +64,7 @@ int main(int argc, char** argv) {
         else if (arg == "--control-rate-hz" && i + 1 < argc) rate_hz = std::stod(argv[++i]);
         else if (arg == "--right-urdf" && i + 1 < argc) right_urdf = argv[++i];
         else if (arg == "--left-urdf" && i + 1 < argc) left_urdf = argv[++i];
+        else if (arg == "--bind-ip" && i + 1 < argc) bind_ip = argv[++i];
         else if (arg == "--watchdog-hold-ms" && i + 1 < argc) safety_config.watchdog_hold_ms = std::stod(argv[++i]);
         else if (arg == "--watchdog-disable-ms" && i + 1 < argc) safety_config.watchdog_disable_ms = std::stod(argv[++i]);
         else if (arg == "--mock") mock = true;
@@ -76,9 +78,10 @@ int main(int argc, char** argv) {
     
     safety::RateLimiter rate_limiter_r(safety_config.max_target_delta_rad_per_cycle, safety_config.max_joint_velocity_rad_s, 1.0 / rate_hz);
     safety::RateLimiter rate_limiter_l(safety_config.max_target_delta_rad_per_cycle, safety_config.max_joint_velocity_rad_s, 1.0 / rate_hz);
-
-    net::UdpReceiver receiver_r("0.0.0.0", right_port);
-    net::UdpReceiver receiver_l("0.0.0.0", left_port);
+    
+    LOG_INFO("Binding to IP: " << bind_ip);
+    net::UdpReceiver receiver_r(bind_ip, right_port);
+    net::UdpReceiver receiver_l(bind_ip, left_port);
     if (!receiver_r.start(packet_callback_r) || !receiver_l.start(packet_callback_l)) {
         LOG_ERROR("Failed to start UDP receivers.");
         return 1;
