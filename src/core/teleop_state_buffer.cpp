@@ -1,5 +1,6 @@
 #include "openarm_wifi_teleop/core/teleop_state_buffer.hpp"
 #include "openarm_wifi_teleop/utils/time.hpp"
+#include "openarm_wifi_teleop/utils/logging.hpp"
 
 namespace openarm_wifi_teleop {
 namespace core {
@@ -19,32 +20,40 @@ void TeleopStateBuffer::update(const net::TeleopPacket& packet) {
         // Sequence number wraps around at uint32_t, we need to handle it.
         uint32_t diff = packet.seq - last_seq_;
         if (diff > 0x7FFFFFFF) {
-            // It's likely older, reject
-            return;
-        }
-
-        // Detect loss
-        if (diff > 1) {
-            lost_packet_count_ += (diff - 1);
-        }
-
-        // Calculate timing stats
-        double gap_ms = (now_ns - last_receive_time_ns_) / 1e6;
-        if (gap_ms > max_receive_gap_ms_) {
-            max_receive_gap_ms_ = gap_ms;
-        }
-        
-        if (average_receive_period_ms_ == 0.0) {
-            average_receive_period_ms_ = gap_ms;
+            // Sequence jumped backwards significantly (e.g. restart)
+            LOG_WARN("Sequence jump detected (" << last_seq_ << " -> " << packet.seq << "). Resetting buffer.");
+            has_data_ = false;
+            average_receive_period_ms_ = 0.0;
+            max_receive_gap_ms_ = 0.0;
+            // fall through to initialization logic below
         } else {
-            average_receive_period_ms_ = alpha_ * gap_ms + (1.0 - alpha_) * average_receive_period_ms_;
+            // Detect loss
+            if (diff > 1) {
+                lost_packet_count_ += (diff - 1);
+            }
+
+            // Calculate timing stats
+            double gap_ms = (now_ns - last_receive_time_ns_) / 1e6;
+            if (gap_ms > max_receive_gap_ms_) {
+                max_receive_gap_ms_ = gap_ms;
+            }
+            
+            if (average_receive_period_ms_ == 0.0) {
+                average_receive_period_ms_ = gap_ms;
+            } else {
+                average_receive_period_ms_ = alpha_ * gap_ms + (1.0 - alpha_) * average_receive_period_ms_;
+            }
         }
     }
 
-    latest_packet_ = packet;
-    last_seq_ = packet.seq;
-    last_receive_time_ns_ = now_ns;
-    has_data_ = true;
+    if (!has_data_) {
+        // Initial or reset state
+        last_receive_time_ns_ = now_ns;
+        last_seq_ = packet.seq;
+        latest_packet_ = packet;
+        has_data_ = true;
+        return;
+    }
 }
 
 bool TeleopStateBuffer::get_latest(net::TeleopPacket& out_packet) {

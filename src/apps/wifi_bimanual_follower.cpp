@@ -86,8 +86,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    safety_mgr_r = std::make_unique<safety::SafetyManager>(safety_config);
-    safety_mgr_l = std::make_unique<safety::SafetyManager>(safety_config);
+    safety_mgr_r = std::make_unique<safety::SafetyManager>(safety_config, "RIGHT");
+    safety_mgr_l = std::make_unique<safety::SafetyManager>(safety_config, "LEFT");
     
     safety::RateLimiter rate_limiter_r(safety_config.max_target_delta_rad_per_cycle, safety_config.max_joint_velocity_rad_s, 1.0 / rate_hz);
     safety::RateLimiter rate_limiter_l(safety_config.max_target_delta_rad_per_cycle, safety_config.max_joint_velocity_rad_s, 1.0 / rate_hz);
@@ -244,7 +244,21 @@ int main(int argc, char** argv) {
 
         auto now = std::chrono::steady_clock::now();
         if (now - print_time > std::chrono::seconds(1)) {
-            LOG_INFO("R_Loss: " << state_buffer_r.get_lost_packet_count() << " | L_Loss: " << state_buffer_l.get_lost_packet_count());
+            auto state_to_str = [](safety::SafetyState s) {
+                switch(s) {
+                    case safety::SafetyState::DISABLED: return "DISABLED";
+                    case safety::SafetyState::WAITING_FOR_ENABLE: return "WAIT_EN";
+                    case safety::SafetyState::READY: return "READY";
+                    case safety::SafetyState::ACTIVE: return "ACTIVE";
+                    case safety::SafetyState::WARNING_TIMEOUT: return "WARN";
+                    case safety::SafetyState::HOLD: return "HOLD";
+                    case safety::SafetyState::ESTOP: return "ESTOP";
+                    case safety::SafetyState::FAULT: return "FAULT";
+                    default: return "UNKNOWN";
+                }
+            };
+            LOG_INFO("Status [R: " << state_to_str(state_r_st) << ", Loss: " << state_buffer_r.get_lost_packet_count() 
+                     << " | L: " << state_to_str(state_l_st) << ", Loss: " << state_buffer_l.get_lost_packet_count() << "]");
             print_time = now;
         }
 

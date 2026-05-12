@@ -5,8 +5,8 @@
 namespace openarm_wifi_teleop {
 namespace safety {
 
-SafetyManager::SafetyManager(const SafetyConfig& config)
-    : config_(config), state_(SafetyState::DISABLED), estop_triggered_(false) {
+SafetyManager::SafetyManager(const SafetyConfig& config, const std::string& arm_name)
+    : config_(config), state_(SafetyState::DISABLED), arm_name_(arm_name), estop_triggered_(false) {
     if (config_.require_enable) {
         state_ = SafetyState::WAITING_FOR_ENABLE;
     } else {
@@ -19,7 +19,7 @@ void SafetyManager::update(const net::TeleopPacket& latest_packet, double time_s
 
     if (estop_triggered_ || latest_packet.estop == 1) {
         if (state_ != SafetyState::ESTOP) {
-            LOG_ERROR("ESTOP triggered!");
+            LOG_ERROR("[" << arm_name_ << "] ESTOP triggered!");
         }
         state_ = SafetyState::ESTOP;
         return;
@@ -34,7 +34,7 @@ void SafetyManager::update(const net::TeleopPacket& latest_packet, double time_s
 
     if (wd_status == Watchdog::Status::DISABLE) {
         if (state_ != SafetyState::FAULT && state_ != SafetyState::DISABLED) {
-            LOG_ERROR("Watchdog timeout! Disabling.");
+            LOG_ERROR("[" << arm_name_ << "] Watchdog timeout! Disabling. Gap: " << time_since_last_packet_ms << "ms");
         }
         state_ = SafetyState::FAULT; // Or DISABLED
         return;
@@ -42,7 +42,7 @@ void SafetyManager::update(const net::TeleopPacket& latest_packet, double time_s
 
     if (state_ == SafetyState::WAITING_FOR_ENABLE) {
         if (latest_packet.enable == 1) {
-            LOG_INFO("Enable signal received. Transitioning to READY.");
+            LOG_INFO("[" << arm_name_ << "] Enable signal received. Transitioning to READY.");
             state_ = SafetyState::READY;
         } else {
             return; // Still waiting
@@ -52,7 +52,7 @@ void SafetyManager::update(const net::TeleopPacket& latest_packet, double time_s
     if (state_ == SafetyState::READY || state_ == SafetyState::ACTIVE || state_ == SafetyState::WARNING_TIMEOUT || state_ == SafetyState::HOLD) {
         if (wd_status == Watchdog::Status::HOLD) {
             if (state_ != SafetyState::HOLD) {
-                LOG_WARN("Watchdog hold triggered.");
+                LOG_WARN("[" << arm_name_ << "] Watchdog hold triggered.");
             }
             state_ = SafetyState::HOLD;
         } else if (wd_status == Watchdog::Status::WARNING) {
@@ -72,7 +72,7 @@ void SafetyManager::trigger_estop() {
     std::lock_guard<std::mutex> lock(mutex_);
     estop_triggered_ = true;
     state_ = SafetyState::ESTOP;
-    LOG_FATAL("Software ESTOP triggered!");
+    LOG_FATAL("[" << arm_name_ << "] Software ESTOP triggered!");
 }
 
 void SafetyManager::reset() {

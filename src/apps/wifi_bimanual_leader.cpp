@@ -114,6 +114,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         leader_arm_r = openarm_init::OpenArmInitializer::initialize_openarm(right_can, true);
+        if (!leader_arm_r) {
+            LOG_ERROR("Failed to initialize right arm on " << right_can);
+            return 1;
+        }
         size_t arm_r_num = leader_arm_r->get_arm().get_motors().size();
         size_t hand_r_num = leader_arm_r->get_gripper().get_motors().size();
         state_r = std::make_shared<RobotSystemState>(arm_r_num, hand_r_num);
@@ -126,6 +130,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         leader_arm_l = openarm_init::OpenArmInitializer::initialize_openarm(left_can, true);
+        if (!leader_arm_l) {
+            LOG_ERROR("Failed to initialize left arm on " << left_can);
+            return 1;
+        }
         size_t arm_l_num = leader_arm_l->get_arm().get_motors().size();
         size_t hand_l_num = leader_arm_l->get_gripper().get_motors().size();
         state_l = std::make_shared<RobotSystemState>(arm_l_num, hand_l_num);

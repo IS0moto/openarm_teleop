@@ -30,7 +30,7 @@ struct SafetyConfig {
 
 class SafetyManager {
 public:
-    SafetyManager(const SafetyConfig& config);
+    SafetyManager(const SafetyConfig& config, const std::string& arm_name = "UNKNOWN");
     
     void update(const net::TeleopPacket& latest_packet, double time_since_last_packet_ms);
     
@@ -42,6 +42,7 @@ private:
     mutable std::mutex mutex_;
     SafetyConfig config_;
     SafetyState state_;
+    std::string arm_name_;
     bool estop_triggered_;
 };
 
