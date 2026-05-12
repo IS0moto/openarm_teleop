@@ -75,8 +75,27 @@ int main(int argc, char** argv) {
     std::shared_ptr<RobotSystemState> state_l;
     
     if (!mock) {
+        char* base_env = std::getenv("OPENARM_DESCRIPTION_PATH");
+        std::string base_path = base_env ? base_env : "";
+
+        auto resolve_urdf = [&](std::string& path, const char* specific_env) {
+            if (path.empty()) {
+                char* s_env = std::getenv(specific_env);
+                if (s_env) path = s_env;
+                else if (!base_path.empty()) {
+                    path = base_path + "/urdf/openarm_bimanual_control.urdf";
+                }
+            }
+            if (!path.empty() && !base_path.empty() && path[0] != '/' && path[0] != '~') {
+                path = base_path + "/" + path;
+            }
+        };
+
+        resolve_urdf(right_urdf, "OPENARM_RIGHT_URDF");
+        resolve_urdf(left_urdf, "OPENARM_LEFT_URDF");
+
         if (right_urdf.empty() || left_urdf.empty()) {
-            LOG_ERROR("--right-urdf and --left-urdf are required in real mode");
+            LOG_ERROR("URDF paths not specified. Set OPENARM_DESCRIPTION_PATH or use --right-urdf/--left-urdf");
             return 1;
         }
 
@@ -89,7 +108,10 @@ int main(int argc, char** argv) {
         auto leader_Fo = leader_loader.get_vector("LeaderArmParam", "Fo");
 
         dynamics_r = new Dynamics(right_urdf, "openarm_body_link0", "openarm_right_hand");
-        dynamics_r->Init();
+        if (!dynamics_r->Init()) {
+            LOG_ERROR("Failed to initialize right arm dynamics");
+            return 1;
+        }
         leader_arm_r = openarm_init::OpenArmInitializer::initialize_openarm(right_can, true);
         size_t arm_r_num = leader_arm_r->get_arm().get_motors().size();
         size_t hand_r_num = leader_arm_r->get_gripper().get_motors().size();
@@ -98,7 +120,10 @@ int main(int argc, char** argv) {
         control_r->SetParameter(leader_kp, leader_kd, leader_Fc, leader_k, leader_Fv, leader_Fo);
         
         dynamics_l = new Dynamics(left_urdf, "openarm_body_link0", "openarm_left_hand");
-        dynamics_l->Init();
+        if (!dynamics_l->Init()) {
+            LOG_ERROR("Failed to initialize left arm dynamics");
+            return 1;
+        }
         leader_arm_l = openarm_init::OpenArmInitializer::initialize_openarm(left_can, true);
         size_t arm_l_num = leader_arm_l->get_arm().get_motors().size();
         size_t hand_l_num = leader_arm_l->get_gripper().get_motors().size();
