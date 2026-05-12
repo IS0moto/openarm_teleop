@@ -46,14 +46,11 @@ void TeleopStateBuffer::update(const net::TeleopPacket& packet) {
         }
     }
 
-    if (!has_data_) {
-        // Initial or reset state
-        last_receive_time_ns_ = now_ns;
-        last_seq_ = packet.seq;
-        latest_packet_ = packet;
-        has_data_ = true;
-        return;
-    }
+    // Update packet data (both initial and subsequent packets)
+    latest_packet_ = packet;
+    last_seq_ = packet.seq;
+    last_receive_time_ns_ = now_ns;
+    has_data_ = true;
 }
 
 bool TeleopStateBuffer::get_latest(net::TeleopPacket& out_packet) {
