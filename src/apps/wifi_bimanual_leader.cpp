@@ -40,8 +40,8 @@ int main(int argc, char** argv) {
     double rate_hz = 500.0;
     bool enable = false;
     bool mock = false;
-    std::string right_urdf = "";
-    std::string left_urdf = "";
+    std::string right_urdf = "urdf/openarm_right.urdf";
+    std::string left_urdf = "urdf/openarm_left.urdf";
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -75,27 +75,8 @@ int main(int argc, char** argv) {
     std::shared_ptr<RobotSystemState> state_l;
     
     if (!mock) {
-        char* base_env = std::getenv("OPENARM_DESCRIPTION_PATH");
-        std::string base_path = base_env ? base_env : "";
-
-        auto resolve_urdf = [&](std::string& path, const char* specific_env) {
-            if (path.empty()) {
-                char* s_env = std::getenv(specific_env);
-                if (s_env) path = s_env;
-                else if (!base_path.empty()) {
-                    path = base_path + "/urdf/openarm_bimanual_control.urdf";
-                }
-            }
-            if (!path.empty() && !base_path.empty() && path[0] != '/' && path[0] != '~') {
-                path = base_path + "/" + path;
-            }
-        };
-
-        resolve_urdf(right_urdf, "OPENARM_RIGHT_URDF");
-        resolve_urdf(left_urdf, "OPENARM_LEFT_URDF");
-
         if (right_urdf.empty() || left_urdf.empty()) {
-            LOG_ERROR("URDF paths not specified. Set OPENARM_DESCRIPTION_PATH or use --right-urdf/--left-urdf");
+            LOG_ERROR("--right-urdf and --left-urdf are required in real mode");
             return 1;
         }
 
