@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-sudo ip link set can0 type can bitrate 1000000
-sudo ip link set can0 up
-sudo ip link set can1 type can bitrate 1000000
-sudo ip link set can1 up
-sudo ip link set can2 type can bitrate 1000000
-sudo ip link set can2 up
-sudo ip link set can3 type can bitrate 1000000
-sudo ip link set can3 up
+# Initialize CAN interfaces in CAN FD mode (required by OpenArm)
+# See: https://docs.openarm.dev/teleop/leader-follower/setup-guide
+
+openarm-can-configure-socketcan can0 -fd
+openarm-can-configure-socketcan can1 -fd
+
+# Follower PC only (uncomment if can2/can3 exist):
+# openarm-can-configure-socketcan can2 -fd
+# openarm-can-configure-socketcan can3 -fd

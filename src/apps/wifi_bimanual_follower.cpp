@@ -41,6 +41,53 @@ void signal_handler(int) {
 void packet_callback_r(const net::TeleopPacket& packet) { state_buffer_r.update(packet); }
 void packet_callback_l(const net::TeleopPacket& packet) { state_buffer_l.update(packet); }
 
+// Verify that motors on a CAN bus are actually responding
+bool verify_arm_hardware(openarm::can::socket::OpenArm* arm, const std::string& can_name, const std::string& arm_label) {
+    arm->recv_all(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    arm->recv_all(1000);
+
+    auto arm_motors = arm->get_arm().get_motors();
+    auto grip_motors = arm->get_gripper().get_motors();
+
+    int arm_responding = 0, arm_total = arm_motors.size();
+    int grip_responding = 0, grip_total = grip_motors.size();
+
+    LOG_INFO("[" << arm_label << "] Verifying " << arm_total << " arm motors + " << grip_total << " gripper motors on " << can_name);
+
+    for (size_t i = 0; i < arm_motors.size(); ++i) {
+        const auto& m = arm_motors[i];
+        bool has_data = (m.get_position() != 0.0 || m.get_velocity() != 0.0);
+        if (has_data) arm_responding++;
+        LOG_INFO("  [" << arm_label << "] Arm motor " << i
+                 << ": responding=" << (has_data ? "YES" : "NO")
+                 << " pos=" << m.get_position()
+                 << " vel=" << m.get_velocity());
+    }
+    for (size_t i = 0; i < grip_motors.size(); ++i) {
+        const auto& m = grip_motors[i];
+        bool has_data = (m.get_position() != 0.0 || m.get_velocity() != 0.0);
+        if (has_data) grip_responding++;
+        LOG_INFO("  [" << arm_label << "] Gripper motor " << i
+                 << ": responding=" << (has_data ? "YES" : "NO")
+                 << " pos=" << m.get_position()
+                 << " vel=" << m.get_velocity());
+    }
+
+    if (arm_responding == 0 && grip_responding == 0) {
+        LOG_ERROR("[" << arm_label << "] NO motors responding on " << can_name << "! Check CAN bus and hardware power.");
+        return false;
+    }
+    if (arm_responding < arm_total || grip_responding < grip_total) {
+        LOG_WARN("[" << arm_label << "] Only " << arm_responding << "/" << arm_total
+                 << " arm motors and " << grip_responding << "/" << grip_total
+                 << " gripper motors responding on " << can_name);
+    } else {
+        LOG_INFO("[" << arm_label << "] All motors verified OK on " << can_name);
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
 
@@ -130,6 +177,11 @@ int main(int argc, char** argv) {
             return 1;
         }
         follower_arm_r = openarm_init::OpenArmInitializer::initialize_openarm(right_can, true);
+        if (!verify_arm_hardware(follower_arm_r, right_can, "RIGHT")) {
+            LOG_ERROR("Right follower arm hardware verification failed. Aborting.");
+            follower_arm_r->disable_all();
+            return 1;
+        }
         size_t arm_r_num = follower_arm_r->get_arm().get_motors().size();
         size_t hand_r_num = follower_arm_r->get_gripper().get_motors().size();
         state_r = std::make_shared<RobotSystemState>(arm_r_num, hand_r_num);
@@ -143,6 +195,12 @@ int main(int argc, char** argv) {
             return 1;
         }
         follower_arm_l = openarm_init::OpenArmInitializer::initialize_openarm(left_can, true);
+        if (!verify_arm_hardware(follower_arm_l, left_can, "LEFT")) {
+            LOG_ERROR("Left follower arm hardware verification failed. Aborting.");
+            follower_arm_l->disable_all();
+            follower_arm_r->disable_all();
+            return 1;
+        }
         size_t arm_l_num = follower_arm_l->get_arm().get_motors().size();
         size_t hand_l_num = follower_arm_l->get_gripper().get_motors().size();
         state_l = std::make_shared<RobotSystemState>(arm_l_num, hand_l_num);
