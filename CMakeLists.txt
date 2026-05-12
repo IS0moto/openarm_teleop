@@ -73,3 +73,61 @@ target_link_libraries(gravity_comp PRIVATE openarm_teleop_lib)
 target_link_libraries(comm_test PRIVATE openarm_teleop_lib)
 target_link_libraries(unilateral_control PRIVATE openarm_teleop_lib)
 target_link_libraries(bilateral_control PRIVATE openarm_teleop_lib)
+
+# -----------------------------
+# Wi-Fi Teleop Library
+# -----------------------------
+add_library(
+  openarm_wifi_teleop_lib STATIC
+  src/utils/logging.cpp
+  src/net/packet_codec.cpp
+  src/net/udp_sender.cpp
+  src/net/udp_receiver.cpp
+  src/core/teleop_state_buffer.cpp
+  src/safety/safety_manager.cpp
+  src/safety/watchdog.cpp
+  src/safety/rate_limiter.cpp
+)
+
+target_include_directories(openarm_wifi_teleop_lib
+                           PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+                           
+target_link_libraries(openarm_wifi_teleop_lib PUBLIC openarm_teleop_lib)
+
+# -----------------------------
+# Wi-Fi Teleop Executables
+# -----------------------------
+add_executable(wifi_single_leader src/apps/wifi_single_leader.cpp)
+add_executable(wifi_single_follower src/apps/wifi_single_follower.cpp)
+add_executable(wifi_bimanual_leader src/apps/wifi_bimanual_leader.cpp)
+add_executable(wifi_bimanual_follower src/apps/wifi_bimanual_follower.cpp)
+
+target_link_libraries(wifi_single_leader PRIVATE openarm_wifi_teleop_lib pthread)
+target_link_libraries(wifi_single_follower PRIVATE openarm_wifi_teleop_lib pthread)
+target_link_libraries(wifi_bimanual_leader PRIVATE openarm_wifi_teleop_lib pthread)
+target_link_libraries(wifi_bimanual_follower PRIVATE openarm_wifi_teleop_lib pthread)
+
+# -----------------------------
+# Tests
+# -----------------------------
+find_package(GTest QUIET)
+if(GTEST_FOUND)
+  enable_testing()
+  add_executable(test_packet_codec tests/test_packet_codec.cpp)
+  add_executable(test_seq_loss_detection tests/test_seq_loss_detection.cpp)
+  add_executable(test_watchdog tests/test_watchdog.cpp)
+  add_executable(test_rate_limiter tests/test_rate_limiter.cpp)
+  add_executable(test_state_buffer tests/test_state_buffer.cpp)
+  
+  target_link_libraries(test_packet_codec PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
+  target_link_libraries(test_seq_loss_detection PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
+  target_link_libraries(test_watchdog PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
+  target_link_libraries(test_rate_limiter PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
+  target_link_libraries(test_state_buffer PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
+  
+  add_test(NAME packet_codec COMMAND test_packet_codec)
+  add_test(NAME seq_loss_detection COMMAND test_seq_loss_detection)
+  add_test(NAME watchdog COMMAND test_watchdog)
+  add_test(NAME rate_limiter COMMAND test_rate_limiter)
+  add_test(NAME state_buffer COMMAND test_state_buffer)
+endif()
