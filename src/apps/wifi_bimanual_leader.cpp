@@ -11,6 +11,7 @@
 #include "openarm_wifi_teleop/net/udp_sender.hpp"
 #include "openarm_wifi_teleop/net/packet_codec.hpp"
 #include "openarm_wifi_teleop/utils/logging.hpp"
+#include "openarm_wifi_teleop/utils/network.hpp"
 #include "openarm_wifi_teleop/utils/time.hpp"
 
 #include <openarm/can/socket/openarm.hpp>
@@ -40,6 +41,10 @@ int main(int argc, char** argv) {
     double rate_hz = 500.0;
     bool enable = false;
     bool mock = false;
+    std::string bind_ip = "0.0.0.0";
+    std::string interface_name = "";
+    uint16_t local_port_r = 0;
+    uint16_t local_port_l = 0;
     std::string right_urdf = "urdf/openarm_right.urdf";
     std::string left_urdf = "urdf/openarm_left.urdf";
     
@@ -53,16 +58,31 @@ int main(int argc, char** argv) {
         else if (arg == "--rate-hz" && i + 1 < argc) rate_hz = std::stod(argv[++i]);
         else if (arg == "--right-urdf" && i + 1 < argc) right_urdf = argv[++i];
         else if (arg == "--left-urdf" && i + 1 < argc) left_urdf = argv[++i];
+        else if (arg == "--bind-ip" && i + 1 < argc) bind_ip = argv[++i];
+        else if (arg == "--interface" && i + 1 < argc) interface_name = argv[++i];
+        else if (arg == "--local-port-r" && i + 1 < argc) local_port_r = std::stoi(argv[++i]);
+        else if (arg == "--local-port-l" && i + 1 < argc) local_port_l = std::stoi(argv[++i]);
         else if (arg == "--enable") enable = true;
         else if (arg == "--mock") mock = true;
     }
 
+    if (!interface_name.empty()) {
+        std::string ip = utils::get_interface_ip(interface_name);
+        if (!ip.empty()) {
+            bind_ip = ip;
+        } else {
+            LOG_ERROR("Could not find IP for interface: " << interface_name);
+            return 1;
+        }
+    }
+
     LOG_INFO("Starting Bimanual Leader");
     LOG_INFO("Follower IP: " << follower_ip << " (" << right_port << ", " << left_port << ")");
+    LOG_INFO("Binding to: " << bind_ip << " (Ports: " << local_port_r << ", " << local_port_l << ")");
     LOG_INFO("Mock mode: " << (mock ? "ON" : "OFF"));
 
-    net::UdpSender sender_r(follower_ip, right_port);
-    net::UdpSender sender_l(follower_ip, left_port);
+    net::UdpSender sender_r(follower_ip, right_port, bind_ip, local_port_r);
+    net::UdpSender sender_l(follower_ip, left_port, bind_ip, local_port_l);
     uint32_t seq = 0;
     
     openarm::can::socket::OpenArm* leader_arm_r = nullptr;

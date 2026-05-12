@@ -9,6 +9,7 @@ namespace net {
 class UdpSender {
 public:
     UdpSender(const std::string& target_ip, uint16_t target_port);
+    UdpSender(const std::string& target_ip, uint16_t target_port, const std::string& local_ip, uint16_t local_port = 0);
     ~UdpSender();
 
     bool send(const TeleopPacket& packet);

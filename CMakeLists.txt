@@ -80,6 +80,7 @@ target_link_libraries(bilateral_control PRIVATE openarm_teleop_lib)
 add_library(
   openarm_wifi_teleop_lib STATIC
   src/utils/logging.cpp
+  src/utils/network.cpp
   src/net/packet_codec.cpp
   src/net/udp_sender.cpp
   src/net/udp_receiver.cpp

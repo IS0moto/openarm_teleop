@@ -13,6 +13,7 @@
 #include "openarm_wifi_teleop/safety/safety_manager.hpp"
 #include "openarm_wifi_teleop/safety/rate_limiter.hpp"
 #include "openarm_wifi_teleop/utils/logging.hpp"
+#include "openarm_wifi_teleop/utils/network.hpp"
 #include "openarm_wifi_teleop/utils/time.hpp"
 
 #include <openarm/can/socket/openarm.hpp>
@@ -50,6 +51,7 @@ int main(int argc, char** argv) {
     double rate_hz = 500.0;
     bool mock = false;
     std::string bind_ip = "0.0.0.0";
+    std::string interface_name = "";
     std::string right_urdf = "urdf/openarm_right.urdf";
     std::string left_urdf = "urdf/openarm_left.urdf";
     
@@ -65,6 +67,7 @@ int main(int argc, char** argv) {
         else if (arg == "--right-urdf" && i + 1 < argc) right_urdf = argv[++i];
         else if (arg == "--left-urdf" && i + 1 < argc) left_urdf = argv[++i];
         else if (arg == "--bind-ip" && i + 1 < argc) bind_ip = argv[++i];
+        else if (arg == "--interface" && i + 1 < argc) interface_name = argv[++i];
         else if (arg == "--watchdog-hold-ms" && i + 1 < argc) safety_config.watchdog_hold_ms = std::stod(argv[++i]);
         else if (arg == "--watchdog-disable-ms" && i + 1 < argc) safety_config.watchdog_disable_ms = std::stod(argv[++i]);
         else if (arg == "--mock") mock = true;
@@ -72,6 +75,16 @@ int main(int argc, char** argv) {
 
     LOG_INFO("Starting Bimanual Follower");
     LOG_INFO("Mock mode: " << (mock ? "ON" : "OFF"));
+
+    if (!interface_name.empty()) {
+        std::string ip = utils::get_interface_ip(interface_name);
+        if (!ip.empty()) {
+            bind_ip = ip;
+        } else {
+            LOG_ERROR("Could not find IP for interface: " << interface_name);
+            return 1;
+        }
+    }
 
     safety_mgr_r = std::make_unique<safety::SafetyManager>(safety_config);
     safety_mgr_l = std::make_unique<safety::SafetyManager>(safety_config);

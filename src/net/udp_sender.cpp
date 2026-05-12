@@ -18,6 +18,29 @@ UdpSender::UdpSender(const std::string& target_ip, uint16_t target_port)
     }
 }
 
+UdpSender::UdpSender(const std::string& target_ip, uint16_t target_port, const std::string& local_ip, uint16_t local_port)
+    : target_ip_(target_ip), target_port_(target_port), sent_count_(0) {
+    
+    socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_fd_ < 0) {
+        LOG_ERROR("Failed to create UDP socket for " << target_ip << ":" << target_port);
+        return;
+    }
+
+    struct sockaddr_in local_addr;
+    std::memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(local_port);
+    if (inet_pton(AF_INET, local_ip.c_str(), &local_addr.sin_addr) <= 0) {
+        LOG_ERROR("Invalid local IP: " << local_ip);
+        return;
+    }
+
+    if (bind(socket_fd_, (struct sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
+        LOG_ERROR("Failed to bind UDP socket to " << local_ip << ":" << local_port);
+    }
+}
+
 UdpSender::~UdpSender() {
     if (socket_fd_ >= 0) {
         close(socket_fd_);
