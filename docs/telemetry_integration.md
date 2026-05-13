@@ -40,3 +40,25 @@ To enable the telemetry publisher, run `wifi_bimanual_follower` with the followi
 You can consume the telemetry using any language that supports UDP sockets. A C++ example is provided in `tools/telemetry_receiver_sample.cpp`.
 
 For Python integration (e.g., LeRobot), see the `lerobot_teleop_recorder` repository which implements a robust `TelemetryClient` that validates magic numbers, sequencing, and packet recency.
+
+## Verifying Telemetry Broadcast
+
+To verify that the telemetry data is being correctly broadcasted over the network when `--publish-telemetry` is enabled, you can run the provided receiver sample tool from Repo A:
+
+```bash
+cd openarm_wifi_bimanual_teleop
+./build/openarm_telemetry_receiver_sample --bind-ip 127.0.0.1 --port 51000
+```
+
+If the data is being successfully received, you will see a continuous stream of packet information:
+
+```text
+Listening for telemetry on 127.0.0.1:51000
+Received packet seq: 1 state_dim: 16 [R1 pos: 0.123]
+Received packet seq: 2 state_dim: 16 [R1 pos: 0.124]
+```
+
+You can also use standard command-line tools like `tcpdump` to verify UDP packets on the port:
+```bash
+sudo tcpdump -i lo udp port 51000
+```
