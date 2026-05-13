@@ -88,6 +88,7 @@ add_library(
   src/safety/safety_manager.cpp
   src/safety/watchdog.cpp
   src/safety/rate_limiter.cpp
+  src/telemetry/openarm_telemetry_publisher.cpp
 )
 
 target_include_directories(openarm_wifi_teleop_lib
@@ -107,6 +108,15 @@ target_link_libraries(wifi_single_leader PRIVATE openarm_wifi_teleop_lib pthread
 target_link_libraries(wifi_single_follower PRIVATE openarm_wifi_teleop_lib pthread)
 target_link_libraries(wifi_bimanual_leader PRIVATE openarm_wifi_teleop_lib pthread)
 target_link_libraries(wifi_bimanual_follower PRIVATE openarm_wifi_teleop_lib pthread)
+
+# -----------------------------
+# Telemetry Tools
+# -----------------------------
+add_executable(openarm_telemetry_mock_publisher tools/telemetry_mock_publisher.cpp)
+add_executable(openarm_telemetry_receiver_sample tools/telemetry_receiver_sample.cpp)
+
+target_link_libraries(openarm_telemetry_mock_publisher PRIVATE openarm_wifi_teleop_lib pthread)
+target_link_libraries(openarm_telemetry_receiver_sample PRIVATE openarm_wifi_teleop_lib pthread)
 
 # -----------------------------
 # Tests
