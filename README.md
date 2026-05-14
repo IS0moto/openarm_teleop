@@ -66,6 +66,25 @@ iperf3 -s
 
 初回は `--rate-hz 250` で確認し、通信が安定していれば `--rate-hz 500` に上げてください。
 
+#### Leader PC - ポーズキャプチャ用（テレメトリ配信あり）
+
+人がリーダー機を手で動かしながら、別PCから関節角度をリアルタイムで確認する場合：
+
+```bash
+./build/wifi_bimanual_leader \
+  --interface wlp46s0 \
+  --follower-ip 127.0.0.1 \
+  --right-can can0 \
+  --left-can can1 \
+  --rate-hz 250 \
+  --publish-telemetry \
+  --telemetry-ip 172.30.21.199 \
+  --telemetry-port 51000 \
+  --enable
+```
+
+`--follower-ip 127.0.0.1` とすることで、followerへの実送信を無効化しつつリーダーを動作させられます。
+
 ## 6. Options
 
 | Option | Description | Default |
@@ -76,6 +95,11 @@ iperf3 -s
 | `--rate-hz` | 通信・制御レート | 500 (Follower) / 250 (Leader) |
 | `--enable` | (Leaderのみ) 送信開始フラグ | false |
 | `--watchdog-disable-ms` | 通信切断とみなす許容時間 (Wi-Fi環境では 500-1000 推奨) | 100 |
+| `--publish-telemetry` | (Leader/Follower) リーダー関節状態をUDP送信する | false |
+| `--telemetry-ip` | テレメトリ送信先IP | `127.0.0.1` |
+| `--telemetry-port` | テレメトリ送信先ポート | `51000` |
+| `--telemetry-rate-hz` | テレメトリ送信レート | `100` |
+
 
 ## 7. Troubleshooting
 
