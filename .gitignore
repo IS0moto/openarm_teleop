@@ -20,3 +20,4 @@ build.ninja
 cmake_install.cmake
 CMakeFiles/
 *.log
+.venv
