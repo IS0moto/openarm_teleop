@@ -1,125 +1,69 @@
-# openarm_wifi_bimanual_teleop
+# OpenArm Wi-Fi Bimanual Teleoperation
 
-## 1. Overview
-このリポジトリはOpenArmのWi-Fi経由bi-manual unilateral teleoperation用です。
-ROS 2は使わず、C++ネイティブ実装による軽量なUDP通信で2台のPC間の状態交換を行います。
-`openarm_teleop` の既存の1台PC構成（AdminThreadでの状態交換）をネットワークに拡張したものです。
+This repository provides a distributed teleoperation system for OpenArm robots over Wi-Fi. It supports two main operation modes: **Standard Leader Mode** (using a physical OpenArm as a master) and **VR Teleop Mode** (using Meta Quest 2 controllers).
 
-## 2. Architecture
-```text
-Leader PC                               Follower PC
-----------                              ------------
-right leader CAN ─┐                 ┌─ right follower CAN
-left  leader CAN ─┤                 ├─ left  follower CAN
-                  │                 │
-wifi_bimanual_leader  === UDP ===  wifi_bimanual_follower
+## Teleoperation Modes
+
+### 1. Standard Leader Mode (Arm-to-Arm)
+In this mode, a physical OpenArm (Leader) is used to control another OpenArm (Follower).
+- **Control Logic**: Direct joint-to-joint mapping (or gravity-compensated passive lead-through).
+- **Binary**: `wifi_bimanual_leader`
+- **Setup**: Requires a Leader arm connected to the network.
+
+### 2. VR Teleop Mode (Quest 2)
+In this mode, Meta Quest 2 controllers are used to move the robot's end-effectors in Cartesian space.
+- **Control Logic**: Relative Cartesian displacement (Delta) converted to joint angles via **Pinocchio IK**.
+- **Binary**: `wifi_vr_bimanual_leader`
+- **Setup**: Requires a PC running the Quest sender and a bridge to ROS 2.
+
+---
+
+## Usage Instructions
+
+### Prerequisites
+1.  **Robot/Sim Side**: Launch the follower robot controller.
+    ```bash
+    ros2 launch openarm_teleop_ros2 follower.launch.py
+    ```
+2.  **UDP Bridge**: Launch the bridge between UDP and ROS 2.
+    ```bash
+    ros2 run openarm_udp_bridge udp_to_ros2_bridge
+    ```
+
+### Mode A: Using physical Leader Arm
+Run the standard leader application on the Leader PC:
+```bash
+./build/wifi_bimanual_leader --follower-ip <FOLLOWER_IP>
 ```
 
-## 3. Build
+### Mode B: Using Meta Quest 2
+1.  **Start the VR Leader App**: This handles IK calculations.
+    ```bash
+    ./build/wifi_vr_bimanual_leader --follower-ip 127.0.0.1
+    ```
+2.  **Start the Quest Sender**: Run this on the machine connected to Quest (via WiVRn or Link).
+    ```bash
+    cd quest2_openxr_logger
+    ./build/openxr_relative_sender
+    ```
+3.  **Operation**: Hold the **Grip** button to start moving. The robot moves relative to its current position at the moment you press the grip (Clutch/Anchor logic).
+
+---
+
+## Build Instructions
+
+### Dependencies
+- **Pinocchio**: Required for VR Mode (IK).
+- **Eigen3**: Linear algebra.
+
+### Build Steps
 ```bash
-git clone <this_repo>
-cd openarm_wifi_bimanual_teleop
-mkdir -p build
-cd build
+mkdir build && cd build
 cmake ..
-make -j
+make -j$(nproc)
 ```
 
-## 4. Network test
-```bash
-# Follower PC
-iperf3 -s
-
-# Leader PC: 250 Hz相当
-./script/network_test_250hz.sh 172.30.21.146
-
-# Leader PC: 500 Hz相当
-./script/network_test_500hz.sh 172.30.21.146
-```
-
-## 5. Run
-
-### Follower PC (Robot Side)
-```bash
-# wlp46s0 インターフェースを使用して起動
-./build/wifi_bimanual_follower \
-  --interface wlp46s0 \
-  --right-can can0 \
-  --left-can can1 \
-  --right-port 50000 \
-  --left-port 50001 \
-  --control-rate-hz 500 \
-  --watchdog-disable-ms 1000
-```
-
-### Leader PC (Operator Side)
-```bash
-# 相手側(Follower)のIPを指定して起動
-./build/wifi_bimanual_leader \
-  --interface wlp46s0 \
-  --follower-ip 172.30.21.146 \
-  --right-can can0 \
-  --left-can can1 \
-  --rate-hz 250 \
-  --enable
-```
-
-初回は `--rate-hz 250` で確認し、通信が安定していれば `--rate-hz 500` に上げてください。
-
-#### Leader PC - ポーズキャプチャ用（テレメトリ配信あり）
-
-人がリーダー機を手で動かしながら、別PCから関節角度をリアルタイムで確認する場合：
-
-```bash
-./build/wifi_bimanual_leader \
-  --interface wlp46s0 \
-  --follower-ip 127.0.0.1 \
-  --right-can can0 \
-  --left-can can1 \
-  --rate-hz 250 \
-  --publish-telemetry \
-  --telemetry-ip 172.30.21.199 \
-  --telemetry-port 51000 \
-  --enable
-```
-
-`--follower-ip 127.0.0.1` とすることで、followerへの実送信を無効化しつつリーダーを動作させられます。
-
-## 6. Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--interface` | 使用するネットワークインターフェース名 (例: `wlp46s0`) | (空) |
-| `--bind-ip` | 待ち受け/送信元のIPアドレスを直接指定する場合 | `0.0.0.0` |
-| `--follower-ip` | (Leaderのみ) 送信先のIPアドレス | - |
-| `--rate-hz` | 通信・制御レート | 500 (Follower) / 250 (Leader) |
-| `--enable` | (Leaderのみ) 送信開始フラグ | false |
-| `--watchdog-disable-ms` | 通信切断とみなす許容時間 (Wi-Fi環境では 500-1000 推奨) | 100 |
-| `--publish-telemetry` | (Leader/Follower) リーダー関節状態をUDP送信する | false |
-| `--telemetry-ip` | テレメトリ送信先IP | `127.0.0.1` |
-| `--telemetry-port` | テレメトリ送信先ポート | `51000` |
-| `--telemetry-rate-hz` | テレメトリ送信レート | `100` |
-
-
-## 7. Troubleshooting
-
-### URDF Error / Segmentation Fault
-`urdf/` フォルダに必要な URDF ファイルが配置されているか確認してください。
-```bash
-mkdir -p urdf
-cp ~/openarm-ws/openarm_bimanual_control.urdf urdf/openarm_right.urdf
-cp ~/openarm-ws/openarm_bimanual_control.urdf urdf/openarm_left.urdf
-```
-
-### Watchdog Timeout
-Wi-Fi環境で遅延が発生する場合、Follower側で `--watchdog-disable-ms 1000` のように閾値を広げてください。
-
-### Permission Denied (CAN)
-CANインターフェースへのアクセス権限がない場合は、`sudo` をつけるか `udev` ルールを設定してください。
-- 起動直後は必ずdisabled
-- `--enable` を渡さないと動かない
-- watchdogあり
-- estopあり
-- Ctrl+C時にdisable_all
-- 初期姿勢差チェック
-- target rate limit
+## Documentation
+For more detailed information on the VR system architecture and troubleshooting, see:
+- [VR System Setup Guide](docs/teleop_system_setup.md)
+- [UDP Bridge README](../openarm_udp_bridge/README.md)
