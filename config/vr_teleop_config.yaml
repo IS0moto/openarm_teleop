@@ -4,26 +4,26 @@ vr_mapping:
   deadband_m: 0.002
   max_delta_per_cycle_m: 0.015
 
-  right_axis_matrix:
-    - [1.0, 0.0, 0.0]
+  right_translation_matrix:
+    - [0.0, 0.0, -1.0]
+    - [-1.0, 0.0, 0.0]
     - [0.0, 1.0, 0.0]
-    - [0.0, 0.0, 1.0]
 
-  left_axis_matrix:
-    - [1.0, 0.0, 0.0]
+  left_translation_matrix:
+    - [0.0, 0.0, -1.0]
+    - [-1.0, 0.0, 0.0]
     - [0.0, 1.0, 0.0]
-    - [0.0, 0.0, 1.0]
 
   # Map Quest (X:Right, Y:Up, Z:Back) to Robot EE Local (X:Right, Y:Up, Z:Forward)
   right_rotation_matrix:
-    - [1.0, 0.0, 0.0]
-    - [0.0, 1.0, 0.0]
     - [0.0, 0.0, -1.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
 
   left_rotation_matrix:
-    - [1.0, 0.0, 0.0]
-    - [0.0, 1.0, 0.0]
     - [0.0, 0.0, -1.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
 
 ik:
   mode: "pose"

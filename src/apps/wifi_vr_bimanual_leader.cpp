@@ -35,10 +35,11 @@ struct VrTeleopConfig {
         double max_delta_m = 0.30;
         double deadband_m = 0.002;
         double max_delta_per_cycle_m = 0.01;
-        Eigen::Matrix3d right_axis_matrix = Eigen::Matrix3d::Identity();
-        Eigen::Matrix3d left_axis_matrix = Eigen::Matrix3d::Identity();
+        Eigen::Matrix3d right_translation_matrix = Eigen::Matrix3d::Identity();
+        Eigen::Matrix3d left_translation_matrix = Eigen::Matrix3d::Identity();
         Eigen::Matrix3d right_rotation_matrix = Eigen::Matrix3d::Identity();
         Eigen::Matrix3d left_rotation_matrix = Eigen::Matrix3d::Identity();
+        std::string rotation_compose_order = "anchor_then_delta"; // or "delta_then_anchor"
     } mapping;
 
     struct IKConfig {
@@ -112,10 +113,13 @@ VrTeleopConfig load_config(const std::string& path) {
                     for(int i=0; i<3; i++) for(int j=0; j<3; j++) mat(i,j) = m[key][i][j].as<double>();
                 }
             };
-            load_matrix("right_axis_matrix", cfg.mapping.right_axis_matrix);
-            load_matrix("left_axis_matrix", cfg.mapping.left_axis_matrix);
+            load_matrix("right_translation_matrix", cfg.mapping.right_translation_matrix);
+            load_matrix("left_translation_matrix", cfg.mapping.left_translation_matrix);
+            load_matrix("right_axis_matrix", cfg.mapping.right_translation_matrix); // Alias
+            load_matrix("left_axis_matrix", cfg.mapping.left_translation_matrix);   // Alias
             load_matrix("right_rotation_matrix", cfg.mapping.right_rotation_matrix);
             load_matrix("left_rotation_matrix", cfg.mapping.left_rotation_matrix);
+            if (m["rotation_compose_order"]) cfg.mapping.rotation_compose_order = m["rotation_compose_order"].as<std::string>();
         }
         if (node["ik"]) {
             auto i = node["ik"];
@@ -169,7 +173,7 @@ struct ArmAnchor {
 int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
 
-    std::string follower_ip = "172.30.21.146";
+    std::string follower_ip = "127.0.0.1";
     uint16_t right_port = 50000;
     uint16_t left_port = 50001;
     uint16_t vr_port = 54002;
@@ -235,58 +239,89 @@ int main(int argc, char** argv) {
     net::UdpSender viz_sender("127.0.0.1", viz_port);
 
     // VR Data
+    struct VrState {
+        uint32_t seq = 0;
+        bool enabled = false;
+        bool estop = false;
+        bool recenter = false;
+        struct Arm {
+            Eigen::Vector3d delta_pos_openxr = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond delta_rot_openxr = Eigen::Quaterniond::Identity();
+            Eigen::Vector3d delta_pos_robot = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond delta_rot_robot = Eigen::Quaterniond::Identity();
+            float grip = 0;
+            float trigger = 0;
+        } left, right;
+        Eigen::Vector3d hmd_pos = Eigen::Vector3d::Zero();
+        Eigen::Quaterniond hmd_quat = Eigen::Quaterniond::Identity();
+        int version = 0;
+    };
+    VrState current_vr_state;
     std::mutex vr_mutex;
-    VrRelativeTeleopPacketV1 last_vr_pkt;
-    std::memset(&last_vr_pkt, 0, sizeof(last_vr_pkt));
     bool vr_connected = false;
     std::chrono::steady_clock::time_point last_vr_time;
 
     net::UdpReceiver vr_receiver("0.0.0.0", vr_port);
     vr_receiver.start_raw([&](const void* data, size_t size) {
-        if (size < 8) {
-            static auto last_size_err = std::chrono::steady_clock::now();
-            if (std::chrono::steady_clock::now() - last_size_err > std::chrono::seconds(1)) {
-                LOG_WARN("VR Packet too small: " << size << " bytes");
-                last_size_err = std::chrono::steady_clock::now();
-            }
-            return;
-        }
-
+        if (size < 8) return;
         uint32_t magic = *static_cast<const uint32_t*>(data);
-        if (magic != VrRelativeTeleopPacketV1::MAGIC) {
-            static auto last_magic_err = std::chrono::steady_clock::now();
-            if (std::chrono::steady_clock::now() - last_magic_err > std::chrono::seconds(1)) {
-                LOG_WARN("VR Invalid Magic: 0x" << std::hex << magic << " (Expected 0x" << VrRelativeTeleopPacketV1::MAGIC << ") size=" << std::dec << size);
-                last_magic_err = std::chrono::steady_clock::now();
-            }
-            return;
-        }
-
-        if (size != sizeof(VrRelativeTeleopPacketV1)) {
-            static auto last_len_err = std::chrono::steady_clock::now();
-            if (std::chrono::steady_clock::now() - last_len_err > std::chrono::seconds(5)) {
-                LOG_WARN("VR Packet size mismatch (Ignored): expected=" << sizeof(VrRelativeTeleopPacketV1) << " received=" << size);
-                last_len_err = std::chrono::steady_clock::now();
-            }
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(vr_mutex);
-            std::memcpy(&last_vr_pkt, data, sizeof(VrRelativeTeleopPacketV1));
+        
+        std::lock_guard<std::mutex> lock(vr_mutex);
+        if (magic == net::VrRelativeTeleopPacketV1::MAGIC && size == sizeof(net::VrRelativeTeleopPacketV1)) {
+            const auto* pkt = static_cast<const net::VrRelativeTeleopPacketV1*>(data);
+            current_vr_state.version = 1;
+            current_vr_state.seq = pkt->seq;
+            current_vr_state.enabled = pkt->enabled;
+            current_vr_state.estop = (pkt->estop != 0);
+            current_vr_state.recenter = (pkt->left_recenter_event || pkt->right_recenter_event);
+            
+            auto fill_arm = [&](const float* p, const float* r, float g, float t, VrState::Arm& arm) {
+                arm.delta_pos_robot = Eigen::Vector3d(p[0], p[1], p[2]);
+                arm.delta_rot_robot = Eigen::Quaterniond(r[3], r[0], r[1], r[2]);
+                arm.grip = g / 255.0f;
+                arm.trigger = t / 255.0f;
+            };
+            fill_arm(pkt->left_delta_pos_robot, pkt->left_delta_rot_robot, pkt->left_grip, pkt->left_trigger, current_vr_state.left);
+            fill_arm(pkt->right_delta_pos_robot, pkt->right_delta_rot_robot, pkt->right_grip, pkt->right_trigger, current_vr_state.right);
+            
+            current_vr_state.hmd_pos = Eigen::Vector3d(pkt->hmd_pos[0], pkt->hmd_pos[1], pkt->hmd_pos[2]);
+            current_vr_state.hmd_quat = Eigen::Quaterniond(pkt->hmd_quat[3], pkt->hmd_quat[0], pkt->hmd_quat[1], pkt->hmd_quat[2]);
+            
+            vr_connected = true;
+            last_vr_time = std::chrono::steady_clock::now();
+        } 
+        else if (magic == net::VrRelativeTeleopPacketV2::MAGIC && size == sizeof(net::VrRelativeTeleopPacketV2)) {
+            const net::VrRelativeTeleopPacketV2* pkt = static_cast<const net::VrRelativeTeleopPacketV2*>(data);
+            current_vr_state.version = 2;
+            current_vr_state.seq = pkt->seq;
+            current_vr_state.enabled = (pkt->left_grip > 0.1 || pkt->right_grip > 0.1);
+            current_vr_state.estop = false; // V2 can add estop field if needed
+            current_vr_state.recenter = false; // V2 uses grip anchor logic in sender
+            
+            auto fill_arm_v2 = [&](const float* p, const float* r, float g, float t, VrState::Arm& arm, const Eigen::Matrix3d& trans_mat, const Eigen::Matrix3d& rot_mat) {
+                arm.delta_pos_openxr = Eigen::Vector3d(p[0], p[1], p[2]);
+                arm.delta_rot_openxr = Eigen::Quaterniond(r[3], r[0], r[1], r[2]);
+                
+                // MAPPING (Phase 3)
+                Eigen::Vector3d scale(cfg.mapping.position_scale_xyz[0], cfg.mapping.position_scale_xyz[1], cfg.mapping.position_scale_xyz[2]);
+                arm.delta_pos_robot = trans_mat * (scale.array() * arm.delta_pos_openxr.array()).matrix();
+                arm.delta_rot_robot = Eigen::Quaterniond(rot_mat * arm.delta_rot_openxr.toRotationMatrix() * rot_mat.transpose());
+                
+                arm.grip = g;
+                arm.trigger = t;
+            };
+            fill_arm_v2(pkt->left_delta_pos_openxr, pkt->left_delta_rot_openxr_xyzw, pkt->left_grip, pkt->left_trigger, current_vr_state.left, cfg.mapping.left_translation_matrix, cfg.mapping.left_rotation_matrix);
+            fill_arm_v2(pkt->right_delta_pos_openxr, pkt->right_delta_rot_openxr_xyzw, pkt->right_grip, pkt->right_trigger, current_vr_state.right, cfg.mapping.right_translation_matrix, cfg.mapping.right_rotation_matrix);
+            
+            current_vr_state.hmd_pos = Eigen::Vector3d(pkt->hmd_pos_openxr[0], pkt->hmd_pos_openxr[1], pkt->hmd_pos_openxr[2]);
+            current_vr_state.hmd_quat = Eigen::Quaterniond(pkt->hmd_quat_openxr_xyzw[3], pkt->hmd_quat_openxr_xyzw[0], pkt->hmd_quat_openxr_xyzw[1], pkt->hmd_quat_openxr_xyzw[2]);
+            
             vr_connected = true;
             last_vr_time = std::chrono::steady_clock::now();
         }
-            
-        // Raw debug: if any grip is pressed, show it
-        if (last_vr_pkt.left_grip || last_vr_pkt.right_grip) {
-            static int dbg_count = 0;
-            if (dbg_count++ % 100 == 0) {
-                std::cout << "[UDP RECV] L_grip=" << (int)last_vr_pkt.left_grip 
-                          << " R_grip=" << (int)last_vr_pkt.right_grip 
-                          << " R_delta_x=" << last_vr_pkt.right_delta_pos_robot[0] << std::endl;
-            }
-        }
+        
+        // Forward RAW VR packet to visualization bridge (V1 or V2)
+        viz_sender.send_raw(data, size);
     });
 
     // Telemetry Data (Robot Feedback for Sync)
@@ -302,7 +337,6 @@ int main(int argc, char** argv) {
             const auto* pkt = static_cast<const telemetry::OpenArmTelemetryPacketV1*>(data);
             if (pkt->magic == telemetry::TELEMETRY_MAGIC) {
                 std::lock_guard<std::mutex> lock(tel_mutex);
-                // Observation state: [R_arm(7), R_grip(1), L_arm(7), L_grip(1)]
                 for (int i = 0; i < 7; ++i) robot_q_r_fb[i] = pkt->observation_state[i];
                 for (int i = 0; i < 7; ++i) robot_q_l_fb[i] = pkt->observation_state[i + 8];
                 last_tel_time = std::chrono::steady_clock::now();
@@ -356,10 +390,10 @@ int main(int argc, char** argv) {
     LOG_INFO("Entering control loop at " << rate_hz << " Hz");
 
     while (keep_running) {
-        VrRelativeTeleopPacketV1 vr_pkt;
+        VrState vr_pkt;
         {
             std::lock_guard<std::mutex> lock(vr_mutex);
-            vr_pkt = last_vr_pkt;
+            vr_pkt = current_vr_state;
         }
 
         std::array<double, 7> fb_r, fb_l;
@@ -383,7 +417,7 @@ int main(int argc, char** argv) {
         bool right_ik_success = false;
         bool left_ik_success = false;
 
-        auto process_arm_logic = [&](net::ArmSide side, const VrRelativeTeleopPacketV1& pkt,
+        auto process_arm_logic = [&](net::ArmSide side, const VrState& vr_pkt,
                                     OpenArmPinocchioIK& ik, ArmAnchor& anchor, control::TemporalSwivelEstimator& swivel_est,
                                     std::array<double, 7>& q_target, 
                                     double& grip_target, const std::array<double, 7>& q_feedback, bool& ik_success, 
@@ -394,15 +428,11 @@ int main(int argc, char** argv) {
                 return; 
             }
 
-            bool grip_held = (side == net::ArmSide::RIGHT) ? pkt.right_grip : pkt.left_grip;
-            bool recenter = (side == net::ArmSide::RIGHT) ? pkt.right_recenter_event : pkt.left_recenter_event;
-            uint8_t trigger = (side == net::ArmSide::RIGHT) ? pkt.right_trigger : pkt.left_trigger;
-            const float* delta_vr_robot = (side == net::ArmSide::RIGHT) ? pkt.right_delta_pos_robot : pkt.left_delta_pos_robot;
-            
-            grip_target = static_cast<double>(trigger) / 255.0;
+            const VrState::Arm& arm_state = (side == net::ArmSide::RIGHT) ? vr_pkt.right : vr_pkt.left;
+            grip_target = arm_state.trigger;
 
-            if (grip_held && tel_connected) {
-                if (!anchor.active || recenter) {
+            if (arm_state.grip > 0.5 && tel_connected) {
+                if (!anchor.active || vr_pkt.recenter) {
                     ik.compute_fk_pose(q_feedback, anchor.robot_ee_pos_anchor, anchor.robot_ee_quat_anchor); 
                     anchor.robot_q_anchor = q_feedback;
                     anchor.active = true;
@@ -411,16 +441,8 @@ int main(int argc, char** argv) {
                     burst_timer = cfg.debug.ik_debug_burst_sec;
                 }
 
-                // 1. Get Delta from Packet (already robot-space from Quest)
-                Eigen::Vector3d delta_pos_in(pkt.right_delta_pos_robot[0], pkt.right_delta_pos_robot[1], pkt.right_delta_pos_robot[2]);
-                if (side == net::ArmSide::LEFT) {
-                    delta_pos_in = Eigen::Vector3d(pkt.left_delta_pos_robot[0], pkt.left_delta_pos_robot[1], pkt.left_delta_pos_robot[2]);
-                }
-                
-                // 2. Mapping
-                Eigen::Vector3d scale(cfg.mapping.position_scale_xyz[0], cfg.mapping.position_scale_xyz[1], cfg.mapping.position_scale_xyz[2]);
-                Eigen::Matrix3d axis_mat = (side == net::ArmSide::RIGHT) ? cfg.mapping.right_axis_matrix : cfg.mapping.left_axis_matrix;
-                Eigen::Vector3d delta_pos_robot = axis_mat * (scale.array() * delta_pos_in.array()).matrix();
+                // 1. Get Delta from VrState (already robot-space)
+                Eigen::Vector3d delta_pos_robot = arm_state.delta_pos_robot;
 
                 // Clamp delta pos to avoid runaway
                 double d_pos_norm = delta_pos_robot.norm();
@@ -428,10 +450,7 @@ int main(int argc, char** argv) {
                     delta_pos_robot *= (cfg.mapping.max_delta_m / d_pos_norm);
                 }
                 
-                const float* d_rot = (side == net::ArmSide::RIGHT) ? pkt.right_delta_rot_robot : pkt.left_delta_rot_robot;
-                Eigen::Quaterniond delta_rot_vr(d_rot[3], d_rot[0], d_rot[1], d_rot[2]);
-                Eigen::Matrix3d rot_map = (side == net::ArmSide::RIGHT) ? cfg.mapping.right_rotation_matrix : cfg.mapping.left_rotation_matrix;
-                Eigen::Quaterniond delta_rot_robot(rot_map * delta_rot_vr.toRotationMatrix() * rot_map.transpose());
+                Eigen::Quaterniond delta_rot_robot = arm_state.delta_rot_robot;
 
                 std::array<double, 3> x_des = {
                     anchor.robot_ee_pos_anchor[0] + delta_pos_robot.x(),
@@ -440,14 +459,19 @@ int main(int argc, char** argv) {
                 };
 
                 Eigen::Quaterniond q_anchor(anchor.robot_ee_quat_anchor[3], anchor.robot_ee_quat_anchor[0], anchor.robot_ee_quat_anchor[1], anchor.robot_ee_quat_anchor[2]);
-                // LOCAL Multiplication: q_anchor * delta
-                Eigen::Quaterniond quat_des = q_anchor * delta_rot_robot;
+                
+                Eigen::Quaterniond quat_des;
+                if (cfg.mapping.rotation_compose_order == "delta_then_anchor") {
+                    quat_des = delta_rot_robot * q_anchor;
+                } else {
+                    quat_des = q_anchor * delta_rot_robot;
+                }
 
                 // 3. Swivel Estimation (Phase 7)
                 double swivel_target = 0.0;
                 if (cfg.human.enabled) {
-                    Eigen::Vector3d hmd_p(pkt.hmd_pos[0], pkt.hmd_pos[1], pkt.hmd_pos[2]);
-                    Eigen::Quaterniond hmd_q(pkt.hmd_quat[3], pkt.hmd_quat[0], pkt.hmd_quat[1], pkt.hmd_quat[2]);
+                    Eigen::Vector3d hmd_p = vr_pkt.hmd_pos;
+                    Eigen::Quaterniond hmd_q = vr_pkt.hmd_quat;
                     
                     double w = cfg.human.shoulder_width_m * (side == net::ArmSide::RIGHT ? 0.5 : -0.5);
                     Eigen::Vector3d shoulder_local(w, -cfg.human.shoulder_down_offset_m, -cfg.human.shoulder_back_offset_m);
@@ -461,7 +485,7 @@ int main(int argc, char** argv) {
                     control::SwivelInput s_in;
                     s_in.shoulder_pos = shoulder_pos_robot;
                     s_in.wrist_pos = wrist_pos_robot;
-                    s_in.wrist_orientation = delta_rot_robot; 
+                    s_in.wrist_orientation = quat_des; // Use composed orientation
                     s_in.dt = 1.0 / rate_hz;
                     s_in.right_arm = (side == net::ArmSide::RIGHT);
                     
@@ -471,11 +495,12 @@ int main(int argc, char** argv) {
                 if (mapping_test) {
                     static int mt_cnt = 0;
                     if (mt_cnt++ % 50 == 0) {
+                        Eigen::AngleAxisd aa(delta_rot_robot);
                         std::cout << "[MAP TEST] " << (side==net::ArmSide::RIGHT?"R":"L") 
-                                  << " Delta_pos: " << delta_pos_robot.x() << "," << delta_pos_robot.y() << "," << delta_pos_robot.z()
+                                  << " Delta_pos: " << delta_pos_robot.transpose()
+                                  << " Delta_rot (AA): " << aa.axis().transpose() << " | " << aa.angle()
                                   << " Swivel: " << swivel_target << std::endl;
                     }
-                    return;
                 }
 
                 std::array<double, 4> quat_des_arr = { quat_des.x(), quat_des.y(), quat_des.z(), quat_des.w() };
@@ -520,24 +545,35 @@ int main(int argc, char** argv) {
                     q_target = q_limited;
                     ik_success = true;
                 }
-                // Task 1 Logging
+                // Phase 4 Logging
                 if (cfg.debug.ik_debug) {
-                    bool should_log = (burst_timer > 0);
-                    if (!should_log) {
-                        static auto last_t = std::chrono::steady_clock::now();
-                        auto now = std::chrono::steady_clock::now();
-                        if (std::chrono::duration<double>(now - last_t).count() > (1.0/cfg.debug.ik_debug_rate_hz)) {
-                            should_log = true;
-                            if (side == net::ArmSide::LEFT) last_t = now;
-                        }
+                    bool should_log = false;
+                    static std::chrono::steady_clock::time_point last_t_r, last_t_l;
+                    auto& last_t = (side == net::ArmSide::RIGHT) ? last_t_r : last_t_l;
+                    auto now = std::chrono::steady_clock::now();
+                    double log_interval = (burst_timer > 0) ? 0.05 : (1.0 / cfg.debug.ik_debug_rate_hz); // 20Hz in burst, otherwise cfg rate
+
+                    if (std::chrono::duration<double>(now - last_t).count() > log_interval) {
+                        should_log = true;
+                        last_t = now;
                     }
+
                     if (should_log) {
-                        std::stringstream ss;
-                        ss << "[IK DBG] " << (side==net::ArmSide::RIGHT?"R":"L") 
-                           << " Success: " << (solved ? "YES" : "NO ") 
-                           << " Err: " << std::fixed << std::setprecision(4) << residual_pos << "m "
-                           << " TargetPos: " << x_des[0] << "," << x_des[1] << "," << x_des[2];
-                        LOG_INFO(ss.str());
+                        std::stringstream log_ss;
+                        log_ss << "--- IK DEBUG (" << (side == net::ArmSide::RIGHT ? "RIGHT" : "LEFT") << ") ---";
+                        if (vr_pkt.version == 2) {
+                            Eigen::AngleAxisd raw_aa(arm_state.delta_rot_openxr);
+                            log_ss << "\n  [Packet V2 Raw] Pos: " << arm_state.delta_pos_openxr.transpose() 
+                                   << " | Rot (AA): " << raw_aa.axis().transpose() << " | " << raw_aa.angle() << " rad";
+                        }
+                        Eigen::AngleAxisd mapped_aa(arm_state.delta_rot_robot);
+                        log_ss << "\n  [Mapped Robot]  Pos: " << arm_state.delta_pos_robot.transpose() 
+                               << " | Rot (AA): " << mapped_aa.axis().transpose() << " | " << mapped_aa.angle() << " rad";
+                        
+                        log_ss << "\n  [Target Pose]   Pos: " << x_des[0] << "," << x_des[1] << "," << x_des[2]
+                               << "\n  [IK Status]     Success: " << (solved ? "YES" : "NO") << " | Residual Pos Err: " << residual_pos << "m";
+                        
+                        LOG_INFO(log_ss.str());
                     }
                     if (burst_timer > 0) burst_timer -= (1.0 / rate_hz);
                 }
@@ -590,8 +626,8 @@ int main(int argc, char** argv) {
             sender.send(pkt);
         };
 
-        send_pkt(sender_r, net::ArmSide::RIGHT, target_q_r, target_grip_r, vr_pkt.right_grip);
-        send_pkt(sender_l, net::ArmSide::LEFT, target_q_l, target_grip_l, vr_pkt.left_grip);
+        send_pkt(sender_r, net::ArmSide::RIGHT, target_q_r, target_grip_r, vr_pkt.right.grip > 0.5);
+        send_pkt(sender_l, net::ArmSide::LEFT, target_q_l, target_grip_l, vr_pkt.left.grip > 0.5);
 
         // Logging (1Hz)
         auto now = std::chrono::steady_clock::now();
@@ -600,22 +636,28 @@ int main(int argc, char** argv) {
             std::cout << "VR:  " << (vr_connected ? "OK" : "NO (Waiting for Quest2...)") << std::endl;
             std::cout << "TEL: " << (tel_connected ? (telemetry_stale ? "STALE (Timeout!)" : "OK") : "NO (Waiting for Follower --publish-telemetry ...)") << std::endl;
             
-            auto log_arm = [&](const char* label, bool grip, const float delta[3], const std::array<double, 7>& q_fb, const std::array<double, 7>& q_target, bool ik_ok) {
+            auto log_arm = [&](const char* label, bool grip, const Eigen::Vector3d& delta, const std::array<double, 7>& q_fb, const std::array<double, 7>& q_target, bool ik_ok) {
                 std::cout << label << ": " << (grip ? "[GRIP] " : "[IDLE] ");
-                std::cout << "Delta: (" << std::fixed << std::setprecision(3) << delta[0] << "," << delta[1] << "," << delta[2] << ") ";
-                std::cout << "IK: " << (ik_ok ? "OK" : "FAIL") << std::endl;
+                std::cout << "Delta: (" << std::fixed << std::setprecision(3) << delta.transpose() << ") ";
+                if (grip) {
+                    std::cout << "IK: " << (ik_ok ? "OK" : "FAIL") << std::endl;
+                } else {
+                    std::cout << "IK: ---" << std::endl;
+                }
                 std::cout << "  FB (j1-3): " << q_fb[0] << ", " << q_fb[1] << ", " << q_fb[2] << std::endl;
                 std::cout << "  TG (j1-3): " << q_target[0] << ", " << q_target[1] << ", " << q_target[2] << std::endl;
             };
 
-            log_arm("RIGHT", vr_pkt.right_grip, vr_pkt.right_delta_pos_robot, fb_r, target_q_r, right_ik_success);
-            log_arm("LEFT ", vr_pkt.left_grip, vr_pkt.left_delta_pos_robot, fb_l, target_q_l, left_ik_success);
+            log_arm("RIGHT", vr_pkt.right.grip > 0.5, vr_pkt.right.delta_pos_robot, fb_r, target_q_r, right_ik_success);
+            log_arm("LEFT ", vr_pkt.left.grip > 0.5, vr_pkt.left.delta_pos_robot, fb_l, target_q_l, left_ik_success);
+            
+            if (vr_pkt.version == 2) {
+                std::cout << "V2 RAW (R): (" << vr_pkt.right.delta_pos_openxr.transpose() << ")" << std::endl;
+                std::cout << "V2 RAW (L): (" << vr_pkt.left.delta_pos_openxr.transpose() << ")" << std::endl;
+            }
             
             last_log_time = now;
         }
-
-        // Forward VR packet to visualization bridge
-        viz_sender.send_raw(&vr_pkt, sizeof(vr_pkt));
 
         seq++;
         next_time += std::chrono::duration_cast<std::chrono::nanoseconds>(period);
