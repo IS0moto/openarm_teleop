@@ -1,0 +1,41 @@
+vr_mapping:
+  position_scale_xyz: [1.0, 1.0, 1.0]
+  max_delta_m: 0.30
+  deadband_m: 0.002
+  max_delta_per_cycle_m: 0.01
+
+  right_axis_matrix:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+
+  left_axis_matrix:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+
+ik:
+  max_iterations: 20
+  convergence_tol_m: 0.005
+  damping: 0.05
+  max_dq_norm: 0.05
+  max_task_step_m: 0.02
+  nullspace_enabled: true
+  nullspace_posture_gain: 0.05
+  max_consecutive_failures: 20
+  failure_hold: true
+
+telemetry:
+  stale_timeout_ms: 100
+  anchor_reset_timeout_ms: 300
+
+rate_limit:
+  enabled: true
+  max_step_rad:
+    right_arm: [0.035, 0.035, 0.035, 0.035, 0.035, 0.025, 0.035, 0.02]
+    left_arm:  [0.035, 0.035, 0.035, 0.035, 0.035, 0.025, 0.035, 0.02]
+
+debug:
+  ik_debug: true
+  ik_debug_rate_hz: 5
+  ik_debug_burst_sec: 3
