@@ -1,144 +1,97 @@
-# Copyright 2025 Enactic, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-cmake_minimum_required(VERSION 3.22)
-project(openarm_teleop)
+cmake_minimum_required(VERSION 3.10)
+project(openarm_wifi_teleop)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
-
 # -----------------------------
-# Find external packages
+# Dependencies
 # -----------------------------
-find_package(OpenArmCAN REQUIRED)
-# find_package(urdf REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(orocos_kdl REQUIRED)
 find_package(kdl_parser REQUIRED)
-find_package(Eigen3 REQUIRED)
-find_package(urdfdom REQUIRED)
-find_package(urdfdom_headers REQUIRED)
+find_package(urdf REQUIRED)
 find_package(yaml-cpp REQUIRED)
 if(NOT TARGET yaml-cpp::yaml-cpp AND TARGET yaml-cpp)
   add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
 endif()
+find_package(pinocchio REQUIRED)
 
 # -----------------------------
-# Create static library
+# External OpenArm CAN Paths
 # -----------------------------
-add_library(
-  openarm_teleop_lib STATIC
-  src/controller/dynamics.cpp src/controller/control.cpp
-  src/openarm_port/openarm_init.cpp src/openarm_port/joint_mapper.cpp)
-
-target_include_directories(openarm_teleop_lib
-                           PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-if(NOT TARGET kdl_parser::kdl_parser)
-  # For old kdl-parser such as libkdl-parser-dev 1.14.2 in Debian.
-  add_library(kdl_parser::kdl_parser INTERFACE IMPORTED)
-  target_link_libraries(kdl_parser::kdl_parser
-                        INTERFACE ${kdl_parser_LIBRARIES})
-  target_include_directories(kdl_parser::kdl_parser
-                             INTERFACE ${kdl_parser_INCLUDE_DIRS})
-endif()
-target_link_libraries(
-  openarm_teleop_lib
-  PUBLIC OpenArmCAN::openarm_can Eigen3::Eigen ${orocos_kdl_LIBRARIES}
-         kdl_parser::kdl_parser urdfdom::urdfdom_model yaml-cpp::yaml-cpp)
+set(OPENARM_CAN_DIR "/home/d2301/openarm-ws/install/openarm_can")
+set(OPENARM_CAN_INC "${OPENARM_CAN_DIR}/include")
+set(OPENARM_CAN_LIB "${OPENARM_CAN_DIR}/lib/libopenarm_can.a")
 
 # -----------------------------
-# Executables
+# Includes
 # -----------------------------
-add_executable(gravity_comp control/gravity_compasation.cpp)
-add_executable(comm_test control/openarm_communication_test.cpp)
-add_executable(unilateral_control control/openarm_unilateral_control.cpp)
-add_executable(bilateral_control control/openarm_bilateral_control.cpp)
+include_directories(
+    include
+    src
+    ${EIGEN3_INCLUDE_DIR}
+    ${orocos_kdl_INCLUDE_DIRS}
+    ${kdl_parser_INCLUDE_DIRS}
+    ${urdf_INCLUDE_DIRS}
+    ${OPENARM_CAN_INC}
+)
 
-target_link_libraries(gravity_comp PRIVATE openarm_teleop_lib)
-target_link_libraries(comm_test PRIVATE openarm_teleop_lib)
-target_link_libraries(unilateral_control PRIVATE openarm_teleop_lib)
-target_link_libraries(bilateral_control PRIVATE openarm_teleop_lib)
+# -----------------------------
+# OpenArm Core Library
+# -----------------------------
+add_library(openarm_teleop_lib STATIC
+    src/controller/control.cpp
+    src/controller/dynamics.cpp
+    src/openarm_port/openarm_init.cpp
+    src/openarm_port/joint_mapper.cpp
+)
+target_link_libraries(openarm_teleop_lib PUBLIC
+    orocos-kdl
+    kdl_parser::kdl_parser
+    urdf::urdf
+    ${Eigen3_LIBRARIES}
+    ${OPENARM_CAN_LIB}
+)
 
 # -----------------------------
 # Wi-Fi Teleop Library
 # -----------------------------
-add_library(
-  openarm_wifi_teleop_lib STATIC
-  src/utils/logging.cpp
-  src/utils/network.cpp
-  src/net/packet_codec.cpp
-  src/net/udp_sender.cpp
-  src/net/udp_receiver.cpp
-  src/core/teleop_state_buffer.cpp
-  src/safety/safety_manager.cpp
-  src/safety/watchdog.cpp
-  src/safety/rate_limiter.cpp
-  src/telemetry/openarm_telemetry_publisher.cpp
+add_library(openarm_wifi_teleop_lib STATIC
+    src/net/udp_sender.cpp
+    src/net/udp_receiver.cpp
+    src/net/packet_codec.cpp
+    src/utils/network.cpp
+    src/utils/logging.cpp
+    src/telemetry/openarm_telemetry_publisher.cpp
+    src/ik/openarm_pinocchio_ik.cpp
+    src/safety/watchdog.cpp
+    src/safety/rate_limiter.cpp
+    src/safety/safety_manager.cpp
+    src/core/teleop_state_buffer.cpp
 )
 
-target_include_directories(openarm_wifi_teleop_lib
-                           PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-                           
-target_link_libraries(openarm_wifi_teleop_lib PUBLIC openarm_teleop_lib)
+target_link_libraries(openarm_wifi_teleop_lib PUBLIC 
+    openarm_teleop_lib
+    yaml-cpp::yaml-cpp
+    pinocchio::pinocchio
+    pthread
+)
 
 # -----------------------------
-# Wi-Fi Teleop Executables
+# Applications
 # -----------------------------
-add_executable(wifi_single_leader src/apps/wifi_single_leader.cpp)
-add_executable(wifi_single_follower src/apps/wifi_single_follower.cpp)
-add_executable(wifi_bimanual_leader src/apps/wifi_bimanual_leader.cpp)
-add_executable(wifi_bimanual_follower src/apps/wifi_bimanual_follower.cpp)
 
-target_link_libraries(wifi_single_leader PRIVATE openarm_wifi_teleop_lib pthread)
-target_link_libraries(wifi_single_follower PRIVATE openarm_wifi_teleop_lib pthread)
-target_link_libraries(wifi_bimanual_leader PRIVATE openarm_wifi_teleop_lib pthread)
-target_link_libraries(wifi_bimanual_follower PRIVATE openarm_wifi_teleop_lib pthread)
+macro(add_wifi_teleop_app name src)
+    add_executable(${name} ${src})
+    target_link_libraries(${name} PRIVATE 
+        openarm_wifi_teleop_lib
+        pthread
+    )
+endmacro()
 
-# -----------------------------
-# Telemetry Tools
-# -----------------------------
-add_executable(openarm_telemetry_mock_publisher tools/telemetry_mock_publisher.cpp)
-add_executable(openarm_telemetry_receiver_sample tools/telemetry_receiver_sample.cpp)
-
-target_link_libraries(openarm_telemetry_mock_publisher PRIVATE openarm_wifi_teleop_lib pthread)
-target_link_libraries(openarm_telemetry_receiver_sample PRIVATE openarm_wifi_teleop_lib pthread)
-
-# -----------------------------
-# Tests
-# -----------------------------
-find_package(GTest QUIET)
-if(GTEST_FOUND)
-  enable_testing()
-  add_executable(test_packet_codec tests/test_packet_codec.cpp)
-  add_executable(test_seq_loss_detection tests/test_seq_loss_detection.cpp)
-  add_executable(test_watchdog tests/test_watchdog.cpp)
-  add_executable(test_rate_limiter tests/test_rate_limiter.cpp)
-  add_executable(test_state_buffer tests/test_state_buffer.cpp)
-  
-  target_link_libraries(test_packet_codec PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
-  target_link_libraries(test_seq_loss_detection PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
-  target_link_libraries(test_watchdog PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
-  target_link_libraries(test_rate_limiter PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
-  target_link_libraries(test_state_buffer PRIVATE openarm_wifi_teleop_lib GTest::gtest_main)
-  
-  add_test(NAME packet_codec COMMAND test_packet_codec)
-  add_test(NAME seq_loss_detection COMMAND test_seq_loss_detection)
-  add_test(NAME watchdog COMMAND test_watchdog)
-  add_test(NAME rate_limiter COMMAND test_rate_limiter)
-  add_test(NAME state_buffer COMMAND test_state_buffer)
-endif()
+add_wifi_teleop_app(wifi_bimanual_leader src/apps/wifi_bimanual_leader.cpp)
+add_wifi_teleop_app(wifi_bimanual_follower src/apps/wifi_bimanual_follower.cpp)
+add_wifi_teleop_app(wifi_vr_bimanual_leader src/apps/wifi_vr_bimanual_leader.cpp)
+add_wifi_teleop_app(wifi_single_leader src/apps/wifi_single_leader.cpp)
+add_wifi_teleop_app(wifi_single_follower src/apps/wifi_single_follower.cpp)

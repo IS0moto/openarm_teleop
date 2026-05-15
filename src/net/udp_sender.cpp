@@ -48,6 +48,10 @@ UdpSender::~UdpSender() {
 }
 
 bool UdpSender::send(const TeleopPacket& packet) {
+    return send_raw(&packet, sizeof(TeleopPacket));
+}
+
+bool UdpSender::send_raw(const void* data, size_t size) {
     if (socket_fd_ < 0) return false;
 
     struct sockaddr_in target_addr;
@@ -59,10 +63,10 @@ bool UdpSender::send(const TeleopPacket& packet) {
         return false;
     }
 
-    ssize_t sent_bytes = sendto(socket_fd_, &packet, sizeof(TeleopPacket), 0,
+    ssize_t sent_bytes = sendto(socket_fd_, data, size, 0,
                                 (struct sockaddr*)&target_addr, sizeof(target_addr));
                                 
-    if (sent_bytes == sizeof(TeleopPacket)) {
+    if (sent_bytes == static_cast<ssize_t>(size)) {
         sent_count_++;
         return true;
     } else {
