@@ -39,8 +39,17 @@ struct VrRelativeTeleopPacketV1 {
     float left_delta_pos_robot[3];
     float right_delta_pos_robot[3];
 
-    float left_delta_rot_robot[4];   // optional quaternion, identity for MVP
-    float right_delta_rot_robot[4];  // optional quaternion, identity for MVP
+    float left_delta_rot_robot[4];
+    float right_delta_rot_robot[4];
+
+    float hmd_pos[3];
+    float hmd_quat[4];
+
+    // Added for visualization (Phase 8) - Quest space (or HMD-relative)
+    float left_controller_pos[3];
+    float left_controller_quat[4];
+    float right_controller_pos[3];
+    float right_controller_quat[4];
 
     uint32_t crc32;
 };
