@@ -13,6 +13,7 @@ public:
     ~UdpSender();
 
     bool send(const TeleopPacket& packet);
+    bool send_raw(const void* data, size_t size);
     
     uint32_t get_sent_count() const { return sent_count_; }
 

@@ -51,6 +51,16 @@ UdpReceiver::~UdpReceiver() {
 }
 
 bool UdpReceiver::start(PacketCallback callback) {
+    callback_ = callback;
+    return start_internal();
+}
+
+bool UdpReceiver::start_raw(RawPacketCallback callback) {
+    raw_callback_ = callback;
+    return start_internal();
+}
+
+bool UdpReceiver::start_internal() {
     if (socket_fd_ < 0) return false;
     if (running_) return true;
 
@@ -58,7 +68,6 @@ bool UdpReceiver::start(PacketCallback callback) {
     int flags = fcntl(socket_fd_, F_GETFL, 0);
     fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK);
 
-    callback_ = callback;
     running_ = true;
     recv_thread_ = std::thread(&UdpReceiver::receive_loop, this);
     
@@ -77,34 +86,37 @@ void UdpReceiver::stop() {
 }
 
 void UdpReceiver::receive_loop() {
-    TeleopPacket packet;
+    uint8_t buffer[4096];
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
     while (running_) {
-        ssize_t recv_bytes = recvfrom(socket_fd_, &packet, sizeof(TeleopPacket), 0,
+        ssize_t recv_bytes = recvfrom(socket_fd_, buffer, sizeof(buffer), 0,
                                       (struct sockaddr*)&client_addr, &client_len);
 
         if (recv_bytes > 0) {
-            if (recv_bytes == sizeof(TeleopPacket)) {
-                if (PacketCodec::decode_and_validate(packet)) {
-                    received_count_++;
-                    if (callback_) {
+            received_count_++;
+            if (raw_callback_) {
+                raw_callback_(buffer, recv_bytes);
+            } else if (callback_) {
+                if (recv_bytes == sizeof(TeleopPacket)) {
+                    TeleopPacket packet;
+                    std::memcpy(&packet, buffer, sizeof(TeleopPacket));
+                    if (PacketCodec::decode_and_validate(packet)) {
                         callback_(packet);
+                    } else {
+                        invalid_count_++;
                     }
                 } else {
                     invalid_count_++;
                 }
-            } else {
-                invalid_count_++;
             }
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // No data available, sleep for a bit (e.g. 1ms)
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             } else {
                 LOG_ERROR("recvfrom error: " << strerror(errno));
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Prevent hot loop on error
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
     }

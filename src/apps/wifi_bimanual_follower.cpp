@@ -15,6 +15,8 @@
 #include "openarm_wifi_teleop/utils/logging.hpp"
 #include "openarm_wifi_teleop/utils/network.hpp"
 #include "openarm_wifi_teleop/utils/time.hpp"
+#include "openarm_wifi_teleop/telemetry/openarm_telemetry_publisher.hpp"
+#include "openarm_wifi_teleop/telemetry/openarm_telemetry_packet.hpp"
 
 #include <openarm/can/socket/openarm.hpp>
 #include <openarm_port/openarm_init.hpp>
@@ -102,6 +104,12 @@ int main(int argc, char** argv) {
     std::string right_urdf = "urdf/openarm_right.urdf";
     std::string left_urdf = "urdf/openarm_left.urdf";
     
+    bool publish_telemetry = false;
+    std::string telemetry_ip = "127.0.0.1";
+    uint16_t telemetry_port = 51000;
+    double telemetry_rate_hz = 100.0;
+    bool telemetry_log_stats = false;
+    
     safety::SafetyConfig safety_config;
 
     for (int i = 1; i < argc; ++i) {
@@ -117,6 +125,11 @@ int main(int argc, char** argv) {
         else if (arg == "--interface" && i + 1 < argc) interface_name = argv[++i];
         else if (arg == "--watchdog-hold-ms" && i + 1 < argc) safety_config.watchdog_hold_ms = std::stod(argv[++i]);
         else if (arg == "--watchdog-disable-ms" && i + 1 < argc) safety_config.watchdog_disable_ms = std::stod(argv[++i]);
+        else if (arg == "--publish-telemetry") publish_telemetry = true;
+        else if (arg == "--telemetry-ip" && i + 1 < argc) telemetry_ip = argv[++i];
+        else if (arg == "--telemetry-port" && i + 1 < argc) telemetry_port = std::stoi(argv[++i]);
+        else if (arg == "--telemetry-rate-hz" && i + 1 < argc) telemetry_rate_hz = std::stod(argv[++i]);
+        else if (arg == "--telemetry-log-stats") telemetry_log_stats = true;
         else if (arg == "--mock") mock = true;
     }
 
@@ -145,6 +158,18 @@ int main(int argc, char** argv) {
     if (!receiver_r.start(packet_callback_r) || !receiver_l.start(packet_callback_l)) {
         LOG_ERROR("Failed to start UDP receivers.");
         return 1;
+    }
+
+    std::unique_ptr<telemetry::OpenArmTelemetryPublisher> telemetry_pub;
+    auto telemetry_period = std::chrono::duration<double>(1.0 / telemetry_rate_hz);
+    auto next_telemetry_time = std::chrono::steady_clock::now();
+
+    if (publish_telemetry) {
+        telemetry_pub = std::make_unique<telemetry::OpenArmTelemetryPublisher>(telemetry_ip, telemetry_port);
+        if (!telemetry_pub->start()) {
+            LOG_ERROR("Failed to start telemetry publisher");
+            return 1;
+        }
     }
 
     openarm::can::socket::OpenArm* follower_arm_r = nullptr;
@@ -321,6 +346,62 @@ int main(int argc, char** argv) {
             LOG_INFO("Status [R: " << state_to_str(state_r_st) << ", Loss: " << state_buffer_r.get_lost_packet_count() 
                      << " | L: " << state_to_str(state_l_st) << ", Loss: " << state_buffer_l.get_lost_packet_count() << "]");
             print_time = now;
+        }
+
+        if (publish_telemetry && now >= next_telemetry_time) {
+            telemetry::OpenArmTelemetryPacketV1 pkt;
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.monotonic_time_ns = utils::now_ns();
+            pkt.robot_type = 1;
+            pkt.control_mode = 1;
+            pkt.enabled = (!mock && (state_r_st == safety::SafetyState::ACTIVE || state_l_st == safety::SafetyState::ACTIVE)) ? 1 : 0;
+            pkt.estop = (state_r_st == safety::SafetyState::ESTOP || state_l_st == safety::SafetyState::ESTOP) ? 1 : 0;
+            pkt.state_dim = 16;
+            pkt.action_dim = 16;
+            pkt.velocity_dim = 16;
+            pkt.watchdog_state = static_cast<uint8_t>(state_r_st);
+            pkt.safety_state = static_cast<uint8_t>(state_l_st);
+
+            if (state_r && state_l) {
+                auto r_arm_resp = state_r->arm_state().get_all_responses();
+                auto r_hand_resp = state_r->hand_state().get_all_responses();
+                auto l_arm_resp = state_l->arm_state().get_all_responses();
+                auto l_hand_resp = state_l->hand_state().get_all_responses();
+
+                auto r_arm_ref = state_r->arm_state().get_all_references();
+                auto r_hand_ref = state_r->hand_state().get_all_references();
+                auto l_arm_ref = state_l->arm_state().get_all_references();
+                auto l_hand_ref = state_l->hand_state().get_all_references();
+
+                int idx = 0;
+                // Right Arm
+                for (size_t i = 0; i < r_arm_resp.size() && idx < 16; ++i, ++idx) {
+                    pkt.observation_state[idx] = r_arm_resp[i].position;
+                    pkt.observation_velocity[idx] = r_arm_resp[i].velocity;
+                    pkt.action[idx] = r_arm_ref[i].position;
+                }
+                // Right Gripper
+                for (size_t i = 0; i < r_hand_resp.size() && idx < 16; ++i, ++idx) {
+                    pkt.observation_state[idx] = r_hand_resp[i].position;
+                    pkt.observation_velocity[idx] = r_hand_resp[i].velocity;
+                    pkt.action[idx] = r_hand_ref[i].position;
+                }
+                // Left Arm
+                for (size_t i = 0; i < l_arm_resp.size() && idx < 16; ++i, ++idx) {
+                    pkt.observation_state[idx] = l_arm_resp[i].position;
+                    pkt.observation_velocity[idx] = l_arm_resp[i].velocity;
+                    pkt.action[idx] = l_arm_ref[i].position;
+                }
+                // Left Gripper
+                for (size_t i = 0; i < l_hand_resp.size() && idx < 16; ++i, ++idx) {
+                    pkt.observation_state[idx] = l_hand_resp[i].position;
+                    pkt.observation_velocity[idx] = l_hand_resp[i].velocity;
+                    pkt.action[idx] = l_hand_ref[i].position;
+                }
+            }
+
+            telemetry_pub->publish(pkt);
+            next_telemetry_time += std::chrono::duration_cast<std::chrono::nanoseconds>(telemetry_period);
         }
 
         next_time += std::chrono::duration_cast<std::chrono::nanoseconds>(period);

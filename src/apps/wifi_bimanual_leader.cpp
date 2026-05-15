@@ -13,6 +13,8 @@
 #include "openarm_wifi_teleop/utils/logging.hpp"
 #include "openarm_wifi_teleop/utils/network.hpp"
 #include "openarm_wifi_teleop/utils/time.hpp"
+#include "openarm_wifi_teleop/telemetry/openarm_telemetry_publisher.hpp"
+#include "openarm_wifi_teleop/telemetry/openarm_telemetry_packet.hpp"
 
 #include <openarm/can/socket/openarm.hpp>
 #include <openarm_port/openarm_init.hpp>
@@ -95,7 +97,12 @@ int main(int argc, char** argv) {
     uint16_t local_port_l = 0;
     std::string right_urdf = "urdf/openarm_right.urdf";
     std::string left_urdf = "urdf/openarm_left.urdf";
-    
+    // Telemetry publishing (identical interface to wifi_bimanual_follower)
+    bool publish_telemetry = false;
+    std::string telemetry_ip = "127.0.0.1";
+    uint16_t telemetry_port = 51000;
+    double telemetry_rate_hz = 100.0;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--follower-ip" && i + 1 < argc) follower_ip = argv[++i];
@@ -112,6 +119,10 @@ int main(int argc, char** argv) {
         else if (arg == "--local-port-l" && i + 1 < argc) local_port_l = std::stoi(argv[++i]);
         else if (arg == "--enable") enable = true;
         else if (arg == "--mock") mock = true;
+        else if (arg == "--publish-telemetry") publish_telemetry = true;
+        else if (arg == "--telemetry-ip" && i + 1 < argc) telemetry_ip = argv[++i];
+        else if (arg == "--telemetry-port" && i + 1 < argc) telemetry_port = std::stoi(argv[++i]);
+        else if (arg == "--telemetry-rate-hz" && i + 1 < argc) telemetry_rate_hz = std::stod(argv[++i]);
     }
 
     if (!interface_name.empty()) {
@@ -211,6 +222,21 @@ int main(int argc, char** argv) {
     auto next_time = std::chrono::steady_clock::now();
     auto print_time = std::chrono::steady_clock::now();
 
+    // --- Telemetry publisher ---
+    std::unique_ptr<telemetry::OpenArmTelemetryPublisher> telemetry_pub;
+    auto telemetry_period = std::chrono::duration<double>(1.0 / telemetry_rate_hz);
+    auto next_telemetry_time = std::chrono::steady_clock::now();
+
+    if (publish_telemetry) {
+        telemetry_pub = std::make_unique<telemetry::OpenArmTelemetryPublisher>(telemetry_ip, telemetry_port);
+        if (!telemetry_pub->start()) {
+            LOG_ERROR("Failed to start telemetry publisher");
+            return 1;
+        }
+        LOG_INFO("Telemetry publishing to " << telemetry_ip << ":" << telemetry_port
+                 << " at " << telemetry_rate_hz << " Hz");
+    }
+
     while (keep_running) {
         net::TeleopPacket pkt_r, pkt_l;
         std::memset(&pkt_r, 0, sizeof(pkt_r));
@@ -278,6 +304,44 @@ int main(int argc, char** argv) {
         if (now - print_time > std::chrono::seconds(1)) {
             LOG_INFO("Sent " << seq << " bimanual packets.");
             print_time = now;
+        }
+
+        // --- Publish telemetry (leader joint state) ---
+        if (publish_telemetry && telemetry_pub && now >= next_telemetry_time) {
+            telemetry::OpenArmTelemetryPacketV1 tpkt;
+            std::memset(&tpkt, 0, sizeof(tpkt));
+            tpkt.monotonic_time_ns = utils::now_ns();
+            tpkt.robot_type    = 1;  // openarm_bimanual
+            tpkt.control_mode  = 1;  // unilateral_wifi
+            tpkt.enabled       = enable ? 1 : 0;
+            tpkt.estop         = 0;
+            tpkt.state_dim     = 16;
+            tpkt.action_dim    = 16;
+            tpkt.velocity_dim  = 16;
+            tpkt.watchdog_state = 3;  // ACTIVE (leader always active)
+            tpkt.safety_state   = 3;
+
+            // Right arm: joints [0..6], gripper [7]
+            for (size_t i = 0; i < pkt_r.arm_dof && i < 7; ++i) {
+                tpkt.observation_state[i]    = static_cast<float>(pkt_r.arm_pos[i]);
+                tpkt.observation_velocity[i] = static_cast<float>(pkt_r.arm_vel[i]);
+            }
+            if (pkt_r.hand_dof > 0) {
+                tpkt.observation_state[7]    = static_cast<float>(pkt_r.hand_pos[0]);
+                tpkt.observation_velocity[7] = static_cast<float>(pkt_r.hand_vel[0]);
+            }
+            // Left arm: joints [8..14], gripper [15]
+            for (size_t i = 0; i < pkt_l.arm_dof && i < 7; ++i) {
+                tpkt.observation_state[8 + i]    = static_cast<float>(pkt_l.arm_pos[i]);
+                tpkt.observation_velocity[8 + i] = static_cast<float>(pkt_l.arm_vel[i]);
+            }
+            if (pkt_l.hand_dof > 0) {
+                tpkt.observation_state[15]    = static_cast<float>(pkt_l.hand_pos[0]);
+                tpkt.observation_velocity[15] = static_cast<float>(pkt_l.hand_vel[0]);
+            }
+
+            telemetry_pub->publish(tpkt);
+            next_telemetry_time = now + std::chrono::duration_cast<std::chrono::nanoseconds>(telemetry_period);
         }
 
         next_time += std::chrono::duration_cast<std::chrono::nanoseconds>(period);
