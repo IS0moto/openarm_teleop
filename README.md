@@ -30,13 +30,25 @@ In this mode, Meta Quest 2 controllers are used to move the robot's end-effector
     ros2 run openarm_udp_bridge udp_to_ros2_bridge
     ```
 
-### Mode A: Using physical Leader Arm
-Run the standard leader application on the Leader PC:
-```bash
-./build/wifi_bimanual_leader --follower-ip <FOLLOWER_IP>
-```
+### Mode A: Using physical Leader Arm (2-PC Setup)
 
-### Mode B: Using Meta Quest 2
+This mode assumes a **Follower PC** (connected to the robot) and a **Leader PC** (connected to the master arm).
+
+1.  **On the Follower PC**:
+    - Launch robot control: `ros2 launch openarm_teleop_ros2 follower.launch.py`
+    - Launch bridge: `ros2 run openarm_udp_bridge udp_to_ros2_bridge`
+    - Ensure this PC's IP is reachable from the Leader PC.
+
+2.  **On the Leader PC**:
+    - Build this repository.
+    - Run the leader application, pointing to the Follower PC's IP:
+      ```bash
+      ./build/wifi_bimanual_leader --follower-ip <FOLLOWER_PC_IP>
+      ```
+    - The leader PC will read its own joints (via local driver or ROS) and stream them to the Follower PC.
+
+### Mode B: Using Meta Quest 2 (VR Mode)
+... (existing content)
 1.  **Start the VR Leader App**: This handles IK calculations.
     ```bash
     ./build/wifi_vr_bimanual_leader --follower-ip 127.0.0.1
