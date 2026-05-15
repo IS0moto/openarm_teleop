@@ -41,9 +41,9 @@ This mode assumes a **Follower PC** (connected to the robot) and a **Leader PC**
 
 2.  **On the Leader PC**:
     - Build this repository.
-    - Run the leader application, pointing to the Follower PC's IP:
+    - Run the leader application, pointing to the Follower PC's IP (e.g., `192.168.1.50`):
       ```bash
-      ./build/wifi_bimanual_leader --follower-ip <FOLLOWER_PC_IP>
+      ./build/wifi_bimanual_leader --follower-ip 192.168.1.50
       ```
     - The leader PC will read its own joints (via local driver or ROS) and stream them to the Follower PC.
 
@@ -76,6 +76,7 @@ make -j$(nproc)
 ```
 
 ## Documentation
-For more detailed information on the VR system architecture and troubleshooting, see:
+For detailed information on configuration and parameters, see:
+- [CLI Arguments & Configuration Reference](docs/cli_arguments.md)
 - [VR System Setup Guide](docs/teleop_system_setup.md)
 - [UDP Bridge README](../openarm_udp_bridge/README.md)
