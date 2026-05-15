@@ -61,80 +61,92 @@ bool OpenArmPinocchioIK::compute_fk(const std::array<double, 7>& q_in, std::arra
 }
 
 bool OpenArmPinocchioIK::solve(const std::array<double, 3>& target_pos,
-                               const std::array<double, 7>& current_q,
-                               std::array<double, 7>& out_q) {
-    // Current configuration in Eigen
+                               const std::array<double, 7>& q_seed,
+                               std::array<double, 7>& out_q,
+                               const std::array<double, 7>* q_anchor) {
+    // Start with seed
     Eigen::VectorXd q = pinocchio::neutral(model_);
-    for (size_t i = 0; i < (int)joint_ids_.size(); ++i) {
+    for (size_t i = 0; i < joint_ids_.size(); ++i) {
         int jid = joint_ids_[i];
         int q_idx = model_.joints[jid].idx_q();
-        q[q_idx] = current_q[i];
+        q[q_idx] = q_seed[i];
     }
 
-    // Target position
     Eigen::Vector3d x_des(target_pos[0], target_pos[1], target_pos[2]);
+    bool success = false;
+    double final_err = 0;
 
-    // Compute current EE pose
-    pinocchio::forwardKinematics(model_, *data_, q);
-    pinocchio::updateFramePlacements(model_, *data_);
-    Eigen::Vector3d x_curr = data_->oMf[ee_id_].translation();
+    for (int iter = 0; iter < params_.max_iterations; ++iter) {
+        pinocchio::forwardKinematics(model_, *data_, q);
+        pinocchio::updateFramePlacements(model_, *data_);
+        
+        Eigen::Vector3d x_curr = data_->oMf[ee_id_].translation();
+        Eigen::Vector3d err = x_des - x_curr;
+        
+        final_err = err.norm();
+        if (final_err < params_.convergence_tol_m) {
+            success = true;
+            break;
+        }
 
-    // Position error
-    Eigen::Vector3d err = x_des - x_curr;
+        // Clamp task step to prevent large jumps in a single iteration
+        if (err.norm() > params_.max_task_step_m) {
+            err = err.normalized() * params_.max_task_step_m;
+        }
 
-    // Numerical check for NaN in error
-    if (std::isnan(err.norm())) return false;
+        Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, model_.nv);
+        J.setZero();
+        pinocchio::computeFrameJacobian(model_, *data_, q, ee_id_, pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J);
+        
+        Eigen::Matrix<double, 3, Eigen::Dynamic> J_pos = J.topRows<3>();
+        
+        // Damped Pseudo-inverse: dq = J^T * (J*J^T + lambda^2 * I)^-1 * err
+        Eigen::Matrix3d JJT = J_pos * J_pos.transpose();
+        JJT.diagonal().array() += std::pow(params_.damping, 2);
+        
+        Eigen::Vector3d rhs = JJT.ldlt().solve(err);
+        Eigen::VectorXd dq = J_pos.transpose() * rhs;
 
-    // Compute Jacobian directly for the frame
-    Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, model_.nv);
-    J.setZero();
-    pinocchio::computeFrameJacobian(model_, *data_, q, ee_id_, pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J);
+        // Task 7: Null-space posture stabilization
+        if (params_.nullspace_enabled && q_anchor) {
+            Eigen::VectorXd q_a = pinocchio::neutral(model_);
+            for(size_t i=0; i<joint_ids_.size(); i++) {
+                q_a[model_.joints[joint_ids_[i]].idx_q()] = (*q_anchor)[i];
+            }
 
-    // Position part of Jacobian
-    Eigen::Matrix<double, 3, Eigen::Dynamic> J_pos = J.topRows<3>();
+            // Posture error (in tangent space)
+            Eigen::VectorXd post_err = pinocchio::difference(model_, q, q_a);
+            
+            // Project into null-space: dq_ns = (I - J# J) * gain * post_err
+            Eigen::MatrixXd J_pinv = J_pos.transpose() * JJT.inverse();
+            Eigen::MatrixXd I = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
+            Eigen::MatrixXd N = I - J_pinv * J_pos;
+            
+            dq += N * (params_.nullspace_posture_gain * post_err);
+        }
 
-    // Use Damped Least Squares with more robust solver
-    Eigen::Matrix3d JJT = J_pos * J_pos.transpose();
-    
-    // Ensure damp_ is not zero
-    double d2 = (damp_ > 0) ? (damp_ * damp_) : 0.0001;
-    JJT.diagonal().array() += d2;
-    
-    // Using COD for maximum stability even in singularity
-    Eigen::Vector3d rhs = JJT.completeOrthogonalDecomposition().solve(err);
-    Eigen::VectorXd dq_full = J_pos.transpose() * rhs;
+        // Clamp dq norm per iteration
+        if (dq.norm() > params_.max_dq_norm) {
+            dq = dq.normalized() * params_.max_dq_norm;
+        }
 
-    // Numerical debug (throttled)
-    static int dbg_cnt = 0;
-    if (dbg_cnt++ % 100 == 0 && err.norm() > 0.001) {
-        std::cout << "[IK DEBUG] err_norm=" << err.norm() << " J_norm=" << J_pos.norm() << " JJT_det=" << JJT.determinant() << " dq_norm=" << dq_full.norm() << std::endl;
-        if (dq_full.norm() < 1e-9) {
-            std::cout << "  ! ALERT: dq is nearly zero despite error !" << std::endl;
+        q = pinocchio::integrate(model_, q, dq);
+
+        // Task 8: Joint limit handling
+        for (int i = 0; i < model_.nq; ++i) {
+            q[i] = std::max(model_.lowerPositionLimit[i], std::min(model_.upperPositionLimit[i], q[i]));
         }
     }
 
-    // Check for NaN in dq
-    if (std::isnan(dq_full.norm())) return false;
-
-    // Extract only the dq for our 7 joints
-    Eigen::VectorXd dq_7 = Eigen::VectorXd::Zero(7);
-    for (size_t i = 0; i < (int)joint_ids_.size(); ++i) {
-        int v_idx = model_.joints[joint_ids_[i]].idx_v();
-        dq_7[i] = dq_full[v_idx];
+    // Extract back to array
+    for (size_t i = 0; i < joint_ids_.size(); ++i) {
+        int jid = joint_ids_[i];
+        int q_idx = model_.joints[jid].idx_q();
+        out_q[i] = q[q_idx];
     }
 
-    // Clamp step
-    double norm = dq_7.norm();
-    if (norm > max_step_) {
-        dq_7 *= (max_step_ / norm);
-    }
-
-    // Update joint positions
-    for (int i = 0; i < 7; ++i) {
-        out_q[i] = current_q[i] + dq_7[i];
-    }
-
-    return true;
+    // Consider it "successful" if error is within a reasonable tolerance
+    return success || (final_err < params_.convergence_tol_m * 5.0);
 }
 
 } // namespace openarm_teleop

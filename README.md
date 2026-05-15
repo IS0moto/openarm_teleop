@@ -79,4 +79,5 @@ make -j$(nproc)
 For detailed information on configuration and parameters, see:
 - [CLI Arguments & Configuration Reference](docs/cli_arguments.md)
 - [VR System Setup Guide](docs/teleop_system_setup.md)
+- [VR Teleoperation Guide (Real Hardware)](docs/vr_teleop_guide.md)
 - [UDP Bridge README](../openarm_udp_bridge/README.md)
