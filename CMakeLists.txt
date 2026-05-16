@@ -20,7 +20,15 @@ find_package(pinocchio REQUIRED)
 # -----------------------------
 # External OpenArm CAN Paths
 # -----------------------------
-set(OPENARM_CAN_DIR "/home/d2301/openarm-ws/install/openarm_can")
+if(NOT DEFINED OPENARM_CAN_DIR)
+    if(DEFINED ENV{OPENARM_CAN_DIR})
+        set(OPENARM_CAN_DIR "$ENV{OPENARM_CAN_DIR}" CACHE PATH "Path to installed OpenArm CAN prefix")
+    else()
+        set(OPENARM_CAN_DIR "/home/d2301/openarm-ws/install/openarm_can" CACHE PATH "Path to installed OpenArm CAN prefix")
+    endif()
+else()
+    set(OPENARM_CAN_DIR "${OPENARM_CAN_DIR}" CACHE PATH "Path to installed OpenArm CAN prefix")
+endif()
 set(OPENARM_CAN_INC "${OPENARM_CAN_DIR}/include")
 set(OPENARM_CAN_LIB "${OPENARM_CAN_DIR}/lib/libopenarm_can.a")
 

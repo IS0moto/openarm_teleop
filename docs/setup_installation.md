@@ -22,7 +22,7 @@ sudo apt install -y \
   build-essential cmake pkg-config \
   libeigen3-dev libyaml-cpp-dev \
   liborocos-kdl-dev liburdfdom-dev liburdfdom-headers-dev \
-  iperf3 can-utils
+  iperf3 can-utils ros-humble-pinocchio
 ```
 
 Install Pinocchio using the method used by your OpenArm workspace. The CMake project calls:
@@ -31,10 +31,23 @@ Install Pinocchio using the method used by your OpenArm workspace. The CMake pro
 find_package(pinocchio REQUIRED)
 ```
 
-Install or build OpenArm CAN so that this path exists, or update `OPENARM_CAN_DIR` in `CMakeLists.txt`:
+Install or build OpenArm CAN so that this path exists, or override `OPENARM_CAN_DIR` in CMake. The default is:
 
 ```text
 /home/d2301/openarm-ws/install/openarm_can
+```
+
+You can override the path by environment variable or CMake option:
+
+```bash
+export OPENARM_CAN_DIR=/path/to/openarm_can
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
+or directly:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENARM_CAN_DIR=/path/to/openarm_can
 ```
 
 ## Build

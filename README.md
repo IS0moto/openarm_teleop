@@ -51,7 +51,11 @@ The current CMake file expects the OpenArm CAN install at:
 /home/d2301/openarm-ws/install/openarm_can
 ```
 
-If your workspace differs, adjust `OPENARM_CAN_DIR` in `CMakeLists.txt` or provide the same install location.
+If your workspace differs, override `OPENARM_CAN_DIR` instead of hardcoding the path in `CMakeLists.txt`, for example with:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENARM_CAN_DIR=/path/to/openarm_can
+```
 
 ## Safety Notes
 

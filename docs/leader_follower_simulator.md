@@ -19,7 +19,8 @@ cd openarm_wifi_bimanual_teleop
   --right-port 50000 \
   --left-port 50001 \
   --control-rate-hz 500 \
-  --watchdog-disable-ms 1000
+  --watchdog-disable-ms 1000 \
+  --publish-telemetry
 ```
 
 ### Terminal B: Mock Leader
