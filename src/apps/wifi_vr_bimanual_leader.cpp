@@ -68,6 +68,7 @@ struct VrTeleopConfig {
         Eigen::Matrix3d left_translation_matrix = Eigen::Matrix3d::Identity();
         Eigen::Matrix3d right_rotation_matrix = Eigen::Matrix3d::Identity();
         Eigen::Matrix3d left_rotation_matrix = Eigen::Matrix3d::Identity();
+        bool invert_rotation_delta = false;
         std::string rotation_compose_order = "anchor_then_delta"; // or "delta_then_anchor"
     } mapping;
 
@@ -150,6 +151,7 @@ VrTeleopConfig load_config(const std::string& path) {
             load_matrix("left_axis_matrix", cfg.mapping.left_translation_matrix);   // Alias
             load_matrix("right_rotation_matrix", cfg.mapping.right_rotation_matrix);
             load_matrix("left_rotation_matrix", cfg.mapping.left_rotation_matrix);
+            if (m["invert_rotation_delta"]) cfg.mapping.invert_rotation_delta = m["invert_rotation_delta"].as<bool>();
             if (m["rotation_compose_order"]) cfg.mapping.rotation_compose_order = m["rotation_compose_order"].as<std::string>();
         }
         if (node["ik"]) {
@@ -294,6 +296,7 @@ int main(int argc, char** argv) {
         else if (key == "swivel_prior.apply_to_ik") cfg.swivel.apply_to_ik = parse_bool(value);
         else if (key == "swivel_prior.log_only") cfg.swivel.log_only = parse_bool(value);
         else if (key == "vr_mapping.rotation_compose_order") cfg.mapping.rotation_compose_order = value;
+        else if (key == "vr_mapping.invert_rotation_delta") cfg.mapping.invert_rotation_delta = parse_bool(value);
         else if (key == "debug.ik_debug_rate_hz") cfg.debug.ik_debug_rate_hz = std::stod(value);
         else if (key == "debug.ik_debug_burst_sec") cfg.debug.ik_debug_burst_sec = std::stod(value);
         else LOG_WARN("Unknown --set override key: " << key);
@@ -315,6 +318,7 @@ int main(int argc, char** argv) {
     log_mapping_basis("LEFT translation", cfg.mapping.left_translation_matrix);
     log_mapping_basis("RIGHT rotation", cfg.mapping.right_rotation_matrix);
     log_mapping_basis("LEFT rotation", cfg.mapping.left_rotation_matrix);
+    LOG_INFO("Rotation delta inversion: " << (cfg.mapping.invert_rotation_delta ? "ON" : "OFF"));
 
     std::ofstream csv_log;
     if (!log_csv_path.empty()) {
@@ -425,6 +429,9 @@ int main(int argc, char** argv) {
                 Eigen::Vector3d scale(cfg.mapping.position_scale_xyz[0], cfg.mapping.position_scale_xyz[1], cfg.mapping.position_scale_xyz[2]);
                 arm.delta_pos_robot = trans_mat * (scale.array() * arm.delta_pos_openxr.array()).matrix();
                 arm.delta_rot_robot = Eigen::Quaterniond(rot_mat * arm.delta_rot_openxr.toRotationMatrix() * rot_mat.transpose());
+                if (cfg.mapping.invert_rotation_delta) {
+                    arm.delta_rot_robot = arm.delta_rot_robot.conjugate();
+                }
                 
                 arm.grip = g;
                 arm.trigger = t;

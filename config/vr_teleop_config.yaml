@@ -18,6 +18,9 @@ vr_mapping:
     - [0.0, 1.0, 0.0]
 
   # Rotation deltas use the same OpenXR-to-robot basis as translation.
+  # Invert the relative quaternion because the controller delta arrives in the
+  # opposite direction from the robot EE command convention.
+  invert_rotation_delta: true
   right_rotation_matrix:
     - [0.0, 0.0, -1.0]
     - [-1.0, 0.0, 0.0]
