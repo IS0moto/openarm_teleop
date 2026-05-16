@@ -374,6 +374,7 @@ int main(int argc, char** argv) {
             Eigen::Quaterniond delta_rot_robot = Eigen::Quaterniond::Identity();
             float grip = 0;
             float trigger = 0;
+            uint8_t buttons = 0;
         } left, right;
         Eigen::Vector3d hmd_pos = Eigen::Vector3d::Zero();
         Eigen::Quaterniond hmd_quat = Eigen::Quaterniond::Identity();
@@ -414,7 +415,9 @@ int main(int argc, char** argv) {
                 arm.trigger = t;
             };
             fill_arm_v2(pkt->left_delta_pos_openxr, pkt->left_delta_rot_openxr_xyzw, pkt->left_grip, pkt->left_trigger, current_vr_state.left, cfg.mapping.left_translation_matrix, cfg.mapping.left_rotation_matrix);
+            current_vr_state.left.buttons = pkt->left_buttons;
             fill_arm_v2(pkt->right_delta_pos_openxr, pkt->right_delta_rot_openxr_xyzw, pkt->right_grip, pkt->right_trigger, current_vr_state.right, cfg.mapping.right_translation_matrix, cfg.mapping.right_rotation_matrix);
+            current_vr_state.right.buttons = pkt->right_buttons;
             
             current_vr_state.hmd_pos = Eigen::Vector3d(pkt->hmd_pos_openxr[0], pkt->hmd_pos_openxr[1], pkt->hmd_pos_openxr[2]);
             current_vr_state.hmd_quat = Eigen::Quaterniond(pkt->hmd_quat_openxr_xyzw[3], pkt->hmd_quat_openxr_xyzw[0], pkt->hmd_quat_openxr_xyzw[1], pkt->hmd_quat_openxr_xyzw[2]);
@@ -785,8 +788,8 @@ int main(int argc, char** argv) {
             std::cout << "VR:  " << (vr_connected ? "OK" : "NO (Waiting for Quest2...)") << std::endl;
             std::cout << "TEL: " << (tel_connected ? (telemetry_stale ? "STALE (Timeout!)" : "OK") : "NO (Waiting for Follower --publish-telemetry ...)") << std::endl;
             
-            auto log_arm = [&](const char* label, bool grip, const Eigen::Vector3d& delta, const std::array<double, 7>& q_fb, const std::array<double, 7>& q_target, bool ik_ok) {
-                std::cout << label << ": " << (grip ? "[GRIP] " : "[IDLE] ");
+            auto log_arm = [&](const char* label, bool grip, uint8_t buttons, const Eigen::Vector3d& delta, const std::array<double, 7>& q_fb, const std::array<double, 7>& q_target, bool ik_ok) {
+                std::cout << label << ": " << (grip ? "[GRIP] " : "[IDLE] ") << "Btns: 0x" << std::hex << (int)buttons << std::dec << " ";
                 std::cout << "Delta: (" << std::fixed << std::setprecision(3) << delta.transpose() << ") ";
                 if (grip) {
                     std::cout << "IK: " << (ik_ok ? "OK" : "FAIL") << std::endl;
@@ -797,8 +800,8 @@ int main(int argc, char** argv) {
                 std::cout << "  TG (j1-3): " << q_target[0] << ", " << q_target[1] << ", " << q_target[2] << std::endl;
             };
 
-            log_arm("RIGHT", vr_pkt.right.grip > 0.5, vr_pkt.right.delta_pos_robot, fb_r, target_q_r, right_ik_success);
-            log_arm("LEFT ", vr_pkt.left.grip > 0.5, vr_pkt.left.delta_pos_robot, fb_l, target_q_l, left_ik_success);
+            log_arm("RIGHT", vr_pkt.right.grip > 0.5, vr_pkt.right.buttons, vr_pkt.right.delta_pos_robot, fb_r, target_q_r, right_ik_success);
+            log_arm("LEFT ", vr_pkt.left.grip > 0.5, vr_pkt.left.buttons, vr_pkt.left.delta_pos_robot, fb_l, target_q_l, left_ik_success);
             
             if (vr_pkt.version == 2) {
                 std::cout << "V2 RAW (R): (" << vr_pkt.right.delta_pos_openxr.transpose() << ")" << std::endl;

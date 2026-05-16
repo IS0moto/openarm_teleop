@@ -90,6 +90,10 @@ struct VrRelativeTeleopPacketV2 {
     float right_trigger;
     float left_trigger;
 
+    uint8_t right_buttons;   // Bit 0: A, Bit 1: B, Bit 2: Menu
+    uint8_t left_buttons;    // Bit 0: X, Bit 1: Y, Bit 2: Menu
+    uint16_t reserved;
+
     uint32_t crc32;
 };
 ```
