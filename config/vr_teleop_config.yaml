@@ -4,6 +4,9 @@ vr_mapping:
   deadband_m: 0.002
   max_delta_per_cycle_m: 0.015
 
+  # OpenXR local: +X right, +Y up, -Z forward.
+  # Robot base: +X forward, +Y left, +Z up.
+  # This maps right -> -Y, up -> +Z, forward -> +X.
   right_translation_matrix:
     - [0.0, 0.0, -1.0]
     - [-1.0, 0.0, 0.0]
@@ -14,7 +17,7 @@ vr_mapping:
     - [-1.0, 0.0, 0.0]
     - [0.0, 1.0, 0.0]
 
-  # Map Quest (X:Right, Y:Up, Z:Back) to Robot EE Local (X:Right, Y:Up, Z:Forward)
+  # Rotation deltas use the same OpenXR-to-robot basis as translation.
   right_rotation_matrix:
     - [0.0, 0.0, -1.0]
     - [-1.0, 0.0, 0.0]

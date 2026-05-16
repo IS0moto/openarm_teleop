@@ -9,6 +9,10 @@
 #include <memory>
 #include <mutex>
 #include <iomanip>
+#include <fstream>
+#include <sstream>
+#include <cstdlib>
+#include <cmath>
 
 #include "openarm_wifi_teleop/net/udp_sender.hpp"
 #include "openarm_wifi_teleop/net/udp_receiver.hpp"
@@ -28,6 +32,31 @@ using namespace openarm_teleop;
 
 std::atomic<bool> keep_running(true);
 void signal_handler(int) { keep_running = false; }
+
+static std::string vec_to_string(const Eigen::Vector3d& v) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3)
+        << "[" << v.x() << ", " << v.y() << ", " << v.z() << "]";
+    return oss.str();
+}
+
+static void log_mapping_basis(const std::string& label, const Eigen::Matrix3d& mat) {
+    const Eigen::Vector3d openxr_right = Eigen::Vector3d::UnitX();
+    const Eigen::Vector3d openxr_up = Eigen::Vector3d::UnitY();
+    const Eigen::Vector3d openxr_forward = -Eigen::Vector3d::UnitZ();
+    const double det = mat.determinant();
+
+    LOG_INFO(label << " mapping basis:"
+             << " OpenXR +X/right -> robot " << vec_to_string(mat * openxr_right)
+             << ", +Y/up -> robot " << vec_to_string(mat * openxr_up)
+             << ", -Z/forward -> robot " << vec_to_string(mat * openxr_forward)
+             << ", det=" << std::fixed << std::setprecision(3) << det);
+
+    if (std::abs(det - 1.0) > 1e-6) {
+        LOG_WARN(label << " mapping determinant is " << det
+                 << "; expected +1 for a proper right-handed axis transform.");
+    }
+}
 
 struct VrTeleopConfig {
     struct VrMapping {
@@ -77,6 +106,8 @@ struct VrTeleopConfig {
 
     struct SwivelConfig {
         bool enabled = true;
+        bool apply_to_ik = true;
+        bool log_only = false;
         double neutral_gain = 0.2;
         double continuity_gain = 0.7;
         double wrist_orientation_gain = 0.1;
@@ -105,9 +136,9 @@ VrTeleopConfig load_config(const std::string& path) {
             if (m["position_scale_xyz"]) {
                 for(int i=0; i<3; i++) cfg.mapping.position_scale_xyz[i] = m["position_scale_xyz"][i].as<double>();
             }
-            cfg.mapping.max_delta_m = m["max_delta_m"].as<double>();
-            cfg.mapping.deadband_m = m["deadband_m"].as<double>();
-            cfg.mapping.max_delta_per_cycle_m = m["max_delta_per_cycle_m"].as<double>();
+            if (m["max_delta_m"]) cfg.mapping.max_delta_m = m["max_delta_m"].as<double>();
+            if (m["deadband_m"]) cfg.mapping.deadband_m = m["deadband_m"].as<double>();
+            if (m["max_delta_per_cycle_m"]) cfg.mapping.max_delta_per_cycle_m = m["max_delta_per_cycle_m"].as<double>();
             auto load_matrix = [&](const std::string& key, Eigen::Matrix3d& mat) {
                 if (m[key]) {
                     for(int i=0; i<3; i++) for(int j=0; j<3; j++) mat(i,j) = m[key][i][j].as<double>();
@@ -124,38 +155,62 @@ VrTeleopConfig load_config(const std::string& path) {
         if (node["ik"]) {
             auto i = node["ik"];
             if (i["mode"]) cfg.ik.mode = i["mode"].as<std::string>();
-            cfg.ik.max_iterations = i["max_iterations"].as<int>();
-            cfg.ik.convergence_tol_m = i["convergence_tol_m"].as<double>();
-            cfg.ik.convergence_tol_rad = i["convergence_tol_rad"].as<double>();
-            cfg.ik.damping = i["damping"].as<double>();
-            cfg.ik.max_dq_norm = i["max_dq_norm"].as<double>();
-            cfg.ik.max_task_step_m = i["max_task_step_m"].as<double>();
-            cfg.ik.max_task_step_rad = i["max_task_step_rad"].as<double>();
-            cfg.ik.position_weight = i["position_weight"].as<double>();
-            cfg.ik.orientation_weight = i["orientation_weight"].as<double>();
-            cfg.ik.nullspace_enabled = i["nullspace_enabled"].as<bool>();
-            cfg.ik.nullspace_posture_gain = i["nullspace_posture_gain"].as<double>();
-            cfg.ik.max_consecutive_failures = i["max_consecutive_failures"].as<int>();
-            cfg.ik.failure_hold = i["failure_hold"].as<bool>();
+            if (i["max_iterations"]) cfg.ik.max_iterations = i["max_iterations"].as<int>();
+            if (i["convergence_tol_m"]) cfg.ik.convergence_tol_m = i["convergence_tol_m"].as<double>();
+            if (i["convergence_tol_pos_m"]) cfg.ik.convergence_tol_m = i["convergence_tol_pos_m"].as<double>();
+            if (i["convergence_tol_rad"]) cfg.ik.convergence_tol_rad = i["convergence_tol_rad"].as<double>();
+            if (i["convergence_tol_ori_rad"]) cfg.ik.convergence_tol_rad = i["convergence_tol_ori_rad"].as<double>();
+            if (i["damping"]) cfg.ik.damping = i["damping"].as<double>();
+            if (i["max_dq_norm"]) cfg.ik.max_dq_norm = i["max_dq_norm"].as<double>();
+            if (i["max_task_step_m"]) cfg.ik.max_task_step_m = i["max_task_step_m"].as<double>();
+            if (i["max_task_step_rad"]) cfg.ik.max_task_step_rad = i["max_task_step_rad"].as<double>();
+            if (i["position_weight"]) cfg.ik.position_weight = i["position_weight"].as<double>();
+            if (i["orientation_weight"]) cfg.ik.orientation_weight = i["orientation_weight"].as<double>();
+            if (i["nullspace_enabled"]) cfg.ik.nullspace_enabled = i["nullspace_enabled"].as<bool>();
+            if (i["nullspace_posture_gain"]) cfg.ik.nullspace_posture_gain = i["nullspace_posture_gain"].as<double>();
+            if (i["max_consecutive_failures"]) cfg.ik.max_consecutive_failures = i["max_consecutive_failures"].as<int>();
+            if (i["failure_hold"]) cfg.ik.failure_hold = i["failure_hold"].as<bool>();
+        }
+        if (node["telemetry"]) {
+            auto t = node["telemetry"];
+            if (t["stale_timeout_ms"]) cfg.tel.stale_timeout_ms = t["stale_timeout_ms"].as<int>();
+            if (t["anchor_reset_timeout_ms"]) cfg.tel.anchor_reset_timeout_ms = t["anchor_reset_timeout_ms"].as<int>();
         }
         if (node["human_model"]) {
             auto h = node["human_model"];
-            cfg.human.enabled = h["enabled"].as<bool>();
-            cfg.human.shoulder_width_m = h["shoulder_width_m"].as<double>();
-            cfg.human.shoulder_down_offset_m = h["shoulder_down_offset_m"].as<double>();
-            cfg.human.shoulder_back_offset_m = h["shoulder_back_offset_m"].as<double>();
-            cfg.human.upper_arm_length_m = h["upper_arm_length_m"].as<double>();
-            cfg.human.forearm_length_m = h["forearm_length_m"].as<double>();
-            cfg.human.neutral_swivel_right_rad = h["neutral_swivel_right_rad"].as<double>();
-            cfg.human.neutral_swivel_left_rad = h["neutral_swivel_left_rad"].as<double>();
+            if (h["enabled"]) cfg.human.enabled = h["enabled"].as<bool>();
+            if (h["shoulder_width_m"]) cfg.human.shoulder_width_m = h["shoulder_width_m"].as<double>();
+            if (h["shoulder_down_offset_m"]) cfg.human.shoulder_down_offset_m = h["shoulder_down_offset_m"].as<double>();
+            if (h["shoulder_back_offset_m"]) cfg.human.shoulder_back_offset_m = h["shoulder_back_offset_m"].as<double>();
+            if (h["upper_arm_length_m"]) cfg.human.upper_arm_length_m = h["upper_arm_length_m"].as<double>();
+            if (h["forearm_length_m"]) cfg.human.forearm_length_m = h["forearm_length_m"].as<double>();
+            if (h["neutral_swivel_right_rad"]) cfg.human.neutral_swivel_right_rad = h["neutral_swivel_right_rad"].as<double>();
+            if (h["neutral_swivel_left_rad"]) cfg.human.neutral_swivel_left_rad = h["neutral_swivel_left_rad"].as<double>();
         }
         if (node["swivel_prior"]) {
             auto s = node["swivel_prior"];
-            cfg.swivel.enabled = s["enabled"].as<bool>();
-            cfg.swivel.neutral_gain = s["neutral_gain"].as<double>();
-            cfg.swivel.continuity_gain = s["continuity_gain"].as<double>();
-            cfg.swivel.wrist_orientation_gain = s["wrist_orientation_gain"].as<double>();
-            cfg.swivel.max_swivel_rate_rad_s = s["max_swivel_rate_rad_s"].as<double>();
+            if (s["enabled"]) cfg.swivel.enabled = s["enabled"].as<bool>();
+            if (s["apply_to_ik"]) cfg.swivel.apply_to_ik = s["apply_to_ik"].as<bool>();
+            if (s["log_only"]) cfg.swivel.log_only = s["log_only"].as<bool>();
+            if (s["neutral_gain"]) cfg.swivel.neutral_gain = s["neutral_gain"].as<double>();
+            if (s["continuity_gain"]) cfg.swivel.continuity_gain = s["continuity_gain"].as<double>();
+            if (s["wrist_orientation_gain"]) cfg.swivel.wrist_orientation_gain = s["wrist_orientation_gain"].as<double>();
+            if (s["max_swivel_rate_rad_s"]) cfg.swivel.max_swivel_rate_rad_s = s["max_swivel_rate_rad_s"].as<double>();
+        }
+        if (node["rate_limit"]) {
+            auto r = node["rate_limit"];
+            if (r["enabled"]) cfg.rate_limit.enabled = r["enabled"].as<bool>();
+            if (r["max_step_rad"]) {
+                auto ms = r["max_step_rad"];
+                if (ms["right_arm"]) for (int k = 0; k < 8; ++k) cfg.rate_limit.max_step_rad_r[k] = ms["right_arm"][k].as<double>();
+                if (ms["left_arm"]) for (int k = 0; k < 8; ++k) cfg.rate_limit.max_step_rad_l[k] = ms["left_arm"][k].as<double>();
+            }
+        }
+        if (node["debug"]) {
+            auto d = node["debug"];
+            if (d["ik_debug"]) cfg.debug.ik_debug = d["ik_debug"].as<bool>();
+            if (d["ik_debug_rate_hz"]) cfg.debug.ik_debug_rate_hz = d["ik_debug_rate_hz"].as<double>();
+            if (d["ik_debug_burst_sec"]) cfg.debug.ik_debug_burst_sec = d["ik_debug_burst_sec"].as<double>();
         }
     } catch (const std::exception& e) {
         LOG_WARN("Failed to load config " << path << ": " << e.what() << ". Using defaults.");
@@ -189,6 +244,9 @@ int main(int argc, char** argv) {
     bool ik_debug = false;
     bool dry_run = false;
     bool mapping_test = false;
+    double max_test_sec = 0.0;
+    std::string log_csv_path;
+    std::vector<std::string> set_overrides;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -200,14 +258,47 @@ int main(int argc, char** argv) {
         else if (arg == "--left-urdf" && i + 1 < argc) left_urdf = argv[++i];
         else if (arg == "--config" && i + 1 < argc) config_path = argv[++i];
         else if (arg == "--ik-debug") ik_debug = true;
+        else if (arg == "--ik-debug-rate-hz" && i + 1 < argc) set_overrides.push_back(std::string("debug.ik_debug_rate_hz=") + argv[++i]);
+        else if (arg == "--ik-debug-burst-sec" && i + 1 < argc) set_overrides.push_back(std::string("debug.ik_debug_burst_sec=") + argv[++i]);
+        else if (arg == "--log-csv" && i + 1 < argc) log_csv_path = argv[++i];
+        else if (arg == "--max-test-sec" && i + 1 < argc) max_test_sec = std::stod(argv[++i]);
         else if (arg == "--dry-run") dry_run = true;
         else if (arg == "--vr-mapping-test") mapping_test = true;
         else if (arg == "--pose-ik") { /* handled after load_config */ }
         else if (arg == "--position-ik") { /* handled after load_config */ }
+        else if (arg == "--set" && i + 1 < argc) set_overrides.push_back(argv[++i]);
     }
 
     VrTeleopConfig cfg = load_config(config_path);
     if (ik_debug) cfg.debug.ik_debug = true; // Override by CLI
+    if (!log_csv_path.empty()) cfg.debug.ik_debug = true;
+
+    auto parse_bool = [](const std::string& value) {
+        return value == "1" || value == "true" || value == "TRUE" || value == "yes" || value == "on";
+    };
+    auto apply_set = [&](const std::string& item) {
+        auto eq = item.find('=');
+        if (eq == std::string::npos) {
+            LOG_WARN("Ignoring malformed --set override: " << item);
+            return;
+        }
+        std::string key = item.substr(0, eq);
+        std::string value = item.substr(eq + 1);
+        if (key == "ik.orientation_weight") cfg.ik.orientation_weight = std::stod(value);
+        else if (key == "ik.position_weight") cfg.ik.position_weight = std::stod(value);
+        else if (key == "ik.damping") cfg.ik.damping = std::stod(value);
+        else if (key == "ik.max_dq_norm") cfg.ik.max_dq_norm = std::stod(value);
+        else if (key == "ik.mode") cfg.ik.mode = value;
+        else if (key == "human_model.enabled") cfg.human.enabled = parse_bool(value);
+        else if (key == "swivel_prior.enabled") cfg.swivel.enabled = parse_bool(value);
+        else if (key == "swivel_prior.apply_to_ik") cfg.swivel.apply_to_ik = parse_bool(value);
+        else if (key == "swivel_prior.log_only") cfg.swivel.log_only = parse_bool(value);
+        else if (key == "vr_mapping.rotation_compose_order") cfg.mapping.rotation_compose_order = value;
+        else if (key == "debug.ik_debug_rate_hz") cfg.debug.ik_debug_rate_hz = std::stod(value);
+        else if (key == "debug.ik_debug_burst_sec") cfg.debug.ik_debug_burst_sec = std::stod(value);
+        else LOG_WARN("Unknown --set override key: " << key);
+    };
+    for (const auto& item : set_overrides) apply_set(item);
     
     // Command line overrides for IK mode
     for (int i = 1; i < argc; ++i) {
@@ -219,6 +310,34 @@ int main(int argc, char** argv) {
     LOG_INFO("Starting VR Bimanual Leader");
     LOG_INFO("Follower IP: " << follower_ip << " (Ports: " << right_port << ", " << left_port << ")");
     LOG_INFO("VR Port: " << vr_port << " | Telemetry Port: " << telemetry_port);
+    LOG_INFO("OpenXR basis assumption: +X=right, +Y=up, -Z=forward. Robot base assumption: +X=forward, +Y=left, +Z=up.");
+    log_mapping_basis("RIGHT translation", cfg.mapping.right_translation_matrix);
+    log_mapping_basis("LEFT translation", cfg.mapping.left_translation_matrix);
+    log_mapping_basis("RIGHT rotation", cfg.mapping.right_rotation_matrix);
+    log_mapping_basis("LEFT rotation", cfg.mapping.left_rotation_matrix);
+
+    std::ofstream csv_log;
+    if (!log_csv_path.empty()) {
+        csv_log.open(log_csv_path);
+        if (!csv_log) {
+            LOG_ERROR("Failed to open IK CSV log: " << log_csv_path);
+            return 1;
+        }
+        csv_log << "timestamp_sec,side,packet_version,grip,trigger,telemetry_age_ms,"
+                << "delta_pos_openxr_x,delta_pos_openxr_y,delta_pos_openxr_z,"
+                << "delta_pos_robot_x,delta_pos_robot_y,delta_pos_robot_z,"
+                << "delta_rot_openxr_axis_x,delta_rot_openxr_axis_y,delta_rot_openxr_axis_z,delta_rot_openxr_angle,"
+                << "delta_rot_robot_axis_x,delta_rot_robot_axis_y,delta_rot_robot_axis_z,delta_rot_robot_angle,"
+                << "target_pos_x,target_pos_y,target_pos_z,current_pos_x,current_pos_y,current_pos_z,"
+                << "target_quat_x,target_quat_y,target_quat_z,target_quat_w,current_quat_x,current_quat_y,current_quat_z,current_quat_w,"
+                << "position_error_norm,orientation_error_norm,"
+                << "q_feedback_1,q_feedback_2,q_feedback_3,q_feedback_4,q_feedback_5,q_feedback_6,q_feedback_7,q_feedback_gripper,"
+                << "q_ik_1,q_ik_2,q_ik_3,q_ik_4,q_ik_5,q_ik_6,q_ik_7,q_ik_gripper,"
+                << "q_cmd_1,q_cmd_2,q_cmd_3,q_cmd_4,q_cmd_5,q_cmd_6,q_cmd_7,q_cmd_gripper,"
+                << "ik_success,ik_iterations,dq_norm,rate_limited,joint_limit_clamped,nan_rejected,telemetry_stale,"
+                << "human_model_enabled,swivel_prior_enabled,swivel_right,swivel_left,swivel_applied,"
+                << "orientation_weight,position_weight,damping,rotation_compose_order\n";
+    }
 
     // IK Solvers
     std::vector<std::string> joint_names_r = {
@@ -355,6 +474,7 @@ int main(int argc, char** argv) {
     auto period = std::chrono::duration<double>(1.0 / rate_hz);
     auto next_time = std::chrono::steady_clock::now();
     auto last_log_time = std::chrono::steady_clock::now();
+    auto start_time = std::chrono::steady_clock::now();
     uint32_t seq = 0;
 
     // Sync parameters to IK objects
@@ -398,6 +518,7 @@ int main(int argc, char** argv) {
 
         std::array<double, 7> fb_r, fb_l;
         bool telemetry_stale = false;
+        double telemetry_age_ms = -1.0;
         {
             std::lock_guard<std::mutex> lock(tel_mutex);
             fb_r = robot_q_r_fb;
@@ -405,6 +526,7 @@ int main(int argc, char** argv) {
             
             auto now = std::chrono::steady_clock::now();
             auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tel_time).count();
+            telemetry_age_ms = tel_connected ? static_cast<double>(age_ms) : -1.0;
             if (tel_connected && age_ms > cfg.tel.stale_timeout_ms) {
                 telemetry_stale = true;
             }
@@ -420,8 +542,8 @@ int main(int argc, char** argv) {
         auto process_arm_logic = [&](net::ArmSide side, const VrState& vr_pkt,
                                     OpenArmPinocchioIK& ik, ArmAnchor& anchor, control::TemporalSwivelEstimator& swivel_est,
                                     std::array<double, 7>& q_target, 
-                                    double& grip_target, const std::array<double, 7>& q_feedback, bool& ik_success, 
-                                    double& burst_timer) {
+                                     double& grip_target, const std::array<double, 7>& q_feedback, bool& ik_success, 
+                                     double& burst_timer) {
             
             if (telemetry_stale) {
                 ik_success = false;
@@ -431,7 +553,8 @@ int main(int argc, char** argv) {
             const VrState::Arm& arm_state = (side == net::ArmSide::RIGHT) ? vr_pkt.right : vr_pkt.left;
             grip_target = arm_state.trigger;
 
-            if (arm_state.grip > 0.5 && tel_connected) {
+            bool feedback_available = tel_connected || dry_run;
+            if (arm_state.grip > 0.5 && feedback_available) {
                 if (!anchor.active || vr_pkt.recenter) {
                     ik.compute_fk_pose(q_feedback, anchor.robot_ee_pos_anchor, anchor.robot_ee_quat_anchor); 
                     anchor.robot_q_anchor = q_feedback;
@@ -469,7 +592,7 @@ int main(int argc, char** argv) {
 
                 // 3. Swivel Estimation (Phase 7)
                 double swivel_target = 0.0;
-                if (cfg.human.enabled) {
+                if (cfg.human.enabled && cfg.swivel.enabled) {
                     Eigen::Vector3d hmd_p = vr_pkt.hmd_pos;
                     Eigen::Quaterniond hmd_q = vr_pkt.hmd_quat;
                     
@@ -508,11 +631,12 @@ int main(int argc, char** argv) {
                 std::array<double, 7> q_anchor_with_swivel = anchor.robot_q_anchor;
                 // Heuristic: Joint 3 (index 2) typically controls the swivel rotation for this 7-DOF kinematic structure.
                 // We offset it by the estimated swivel angle to bias the IK towards a natural posture.
-                if (cfg.human.enabled) {
+                bool swivel_applied = cfg.human.enabled && cfg.swivel.enabled && cfg.swivel.apply_to_ik && !cfg.swivel.log_only;
+                if (swivel_applied) {
                     q_anchor_with_swivel[2] += swivel_target; 
                 }
 
-                std::array<double, 7> q_ik_out;
+                std::array<double, 7> q_ik_out = q_feedback;
                 bool solved = false;
                 double residual_pos = 0, residual_ori = 0;
                 if (cfg.ik.mode == "pose") {
@@ -521,14 +645,14 @@ int main(int argc, char** argv) {
                     solved = ik.solve(x_des, q_feedback, q_ik_out, &q_anchor_with_swivel);
                 }
 
-                if (!solved && cfg.debug.ik_debug) {
-                    // Quick FK to see how far we are
-                    std::array<double, 3> actual_pos;
-                    std::array<double, 4> actual_quat;
-                    ik.compute_fk_pose(q_ik_out, actual_pos, actual_quat);
-                    residual_pos = std::sqrt(std::pow(actual_pos[0]-x_des[0],2) + std::pow(actual_pos[1]-x_des[1],2) + std::pow(actual_pos[2]-x_des[2],2));
-                }
+                std::array<double, 3> actual_pos;
+                std::array<double, 4> actual_quat;
+                ik.compute_fk_pose(q_ik_out, actual_pos, actual_quat);
+                residual_pos = std::sqrt(std::pow(actual_pos[0]-x_des[0],2) + std::pow(actual_pos[1]-x_des[1],2) + std::pow(actual_pos[2]-x_des[2],2));
+                Eigen::Quaterniond q_actual(actual_quat[3], actual_quat[0], actual_quat[1], actual_quat[2]);
+                residual_ori = Eigen::AngleAxisd(q_actual.conjugate() * quat_des).angle();
 
+                bool rate_limited = false;
                 if (solved) {
                     
                     const auto& max_steps = (side == net::ArmSide::RIGHT) ? cfg.rate_limit.max_step_rad_r : cfg.rate_limit.max_step_rad_l;
@@ -536,8 +660,9 @@ int main(int argc, char** argv) {
                     std::array<double, 7> q_limited;
                     for (int i = 0; i < 7; ++i) {
                         double diff = q_ik_out[i] - q_target[i];
-                        if (std::abs(diff) > max_steps[i]) {
+                        if (cfg.rate_limit.enabled && std::abs(diff) > max_steps[i]) {
                             diff = (diff > 0 ? 1.0 : -1.0) * max_steps[i];
+                            rate_limited = true;
                         }
                         q_limited[i] = q_target[i] + diff;
                     }
@@ -574,12 +699,52 @@ int main(int argc, char** argv) {
                                << "\n  [IK Status]     Success: " << (solved ? "YES" : "NO") << " | Residual Pos Err: " << residual_pos << "m";
                         
                         LOG_INFO(log_ss.str());
+                        if (csv_log) {
+                            Eigen::AngleAxisd raw_aa(arm_state.delta_rot_openxr);
+                            Eigen::AngleAxisd mapped_aa(arm_state.delta_rot_robot);
+                            double dq_norm = 0.0;
+                            bool nan_rejected = false;
+                            for (int i = 0; i < 7; ++i) {
+                                double d = q_ik_out[i] - q_feedback[i];
+                                dq_norm += d * d;
+                                if (!std::isfinite(q_target[i]) || !std::isfinite(q_ik_out[i])) nan_rejected = true;
+                            }
+                            dq_norm = std::sqrt(dq_norm);
+                            csv_log << std::fixed << std::setprecision(9)
+                                    << openarm_wifi_teleop::utils::now_ns() * 1e-9 << ','
+                                    << (side == net::ArmSide::RIGHT ? "right" : "left") << ','
+                                    << vr_pkt.version << ','
+                                    << arm_state.grip << ',' << arm_state.trigger << ',' << telemetry_age_ms << ','
+                                    << arm_state.delta_pos_openxr.x() << ',' << arm_state.delta_pos_openxr.y() << ',' << arm_state.delta_pos_openxr.z() << ','
+                                    << delta_pos_robot.x() << ',' << delta_pos_robot.y() << ',' << delta_pos_robot.z() << ','
+                                    << raw_aa.axis().x() << ',' << raw_aa.axis().y() << ',' << raw_aa.axis().z() << ',' << raw_aa.angle() << ','
+                                    << mapped_aa.axis().x() << ',' << mapped_aa.axis().y() << ',' << mapped_aa.axis().z() << ',' << mapped_aa.angle() << ','
+                                    << x_des[0] << ',' << x_des[1] << ',' << x_des[2] << ','
+                                    << actual_pos[0] << ',' << actual_pos[1] << ',' << actual_pos[2] << ','
+                                    << quat_des.x() << ',' << quat_des.y() << ',' << quat_des.z() << ',' << quat_des.w() << ','
+                                    << actual_quat[0] << ',' << actual_quat[1] << ',' << actual_quat[2] << ',' << actual_quat[3] << ','
+                                    << residual_pos << ',' << residual_ori << ',';
+                            for (int i = 0; i < 7; ++i) csv_log << q_feedback[i] << ',';
+                            csv_log << grip_target << ',';
+                            for (int i = 0; i < 7; ++i) csv_log << q_ik_out[i] << ',';
+                            csv_log << grip_target << ',';
+                            for (int i = 0; i < 7; ++i) csv_log << q_target[i] << ',';
+                            csv_log << grip_target << ','
+                                    << (solved ? 1 : 0) << ',' << cfg.ik.max_iterations << ',' << dq_norm << ','
+                                    << (rate_limited ? 1 : 0) << ",0," << (nan_rejected ? 1 : 0) << ',' << (telemetry_stale ? 1 : 0) << ','
+                                    << (cfg.human.enabled ? 1 : 0) << ',' << (cfg.swivel.enabled ? 1 : 0) << ','
+                                    << (side == net::ArmSide::RIGHT ? swivel_target : 0.0) << ','
+                                    << (side == net::ArmSide::LEFT ? swivel_target : 0.0) << ','
+                                    << (swivel_applied ? 1 : 0) << ','
+                                    << cfg.ik.orientation_weight << ',' << cfg.ik.position_weight << ',' << cfg.ik.damping << ','
+                                    << cfg.mapping.rotation_compose_order << '\n';
+                        }
                     }
                     if (burst_timer > 0) burst_timer -= (1.0 / rate_hz);
                 }
             } else {
                 anchor.active = false;
-                if (tel_connected) q_target = q_feedback;
+                if (feedback_available) q_target = q_feedback;
             }
         };
 
@@ -660,6 +825,9 @@ int main(int argc, char** argv) {
         }
 
         seq++;
+        if (max_test_sec > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() >= max_test_sec) {
+            keep_running = false;
+        }
         next_time += std::chrono::duration_cast<std::chrono::nanoseconds>(period);
         std::this_thread::sleep_until(next_time);
     }
