@@ -390,30 +390,7 @@ int main(int argc, char** argv) {
         uint32_t magic = *static_cast<const uint32_t*>(data);
         
         std::lock_guard<std::mutex> lock(vr_mutex);
-        if (magic == net::VrRelativeTeleopPacketV1::MAGIC && size == sizeof(net::VrRelativeTeleopPacketV1)) {
-            const auto* pkt = static_cast<const net::VrRelativeTeleopPacketV1*>(data);
-            current_vr_state.version = 1;
-            current_vr_state.seq = pkt->seq;
-            current_vr_state.enabled = pkt->enabled;
-            current_vr_state.estop = (pkt->estop != 0);
-            current_vr_state.recenter = (pkt->left_recenter_event || pkt->right_recenter_event);
-            
-            auto fill_arm = [&](const float* p, const float* r, float g, float t, VrState::Arm& arm) {
-                arm.delta_pos_robot = Eigen::Vector3d(p[0], p[1], p[2]);
-                arm.delta_rot_robot = Eigen::Quaterniond(r[3], r[0], r[1], r[2]);
-                arm.grip = g / 255.0f;
-                arm.trigger = t / 255.0f;
-            };
-            fill_arm(pkt->left_delta_pos_robot, pkt->left_delta_rot_robot, pkt->left_grip, pkt->left_trigger, current_vr_state.left);
-            fill_arm(pkt->right_delta_pos_robot, pkt->right_delta_rot_robot, pkt->right_grip, pkt->right_trigger, current_vr_state.right);
-            
-            current_vr_state.hmd_pos = Eigen::Vector3d(pkt->hmd_pos[0], pkt->hmd_pos[1], pkt->hmd_pos[2]);
-            current_vr_state.hmd_quat = Eigen::Quaterniond(pkt->hmd_quat[3], pkt->hmd_quat[0], pkt->hmd_quat[1], pkt->hmd_quat[2]);
-            
-            vr_connected = true;
-            last_vr_time = std::chrono::steady_clock::now();
-        } 
-        else if (magic == net::VrRelativeTeleopPacketV2::MAGIC && size == sizeof(net::VrRelativeTeleopPacketV2)) {
+        if (magic == net::VrRelativeTeleopPacketV2::MAGIC && size == sizeof(net::VrRelativeTeleopPacketV2)) {
             const net::VrRelativeTeleopPacketV2* pkt = static_cast<const net::VrRelativeTeleopPacketV2*>(data);
             current_vr_state.version = 2;
             current_vr_state.seq = pkt->seq;
@@ -446,7 +423,7 @@ int main(int argc, char** argv) {
             last_vr_time = std::chrono::steady_clock::now();
         }
         
-        // Forward RAW VR packet to visualization bridge (V1 or V2)
+        // Forward RAW VR packet to visualization bridge.
         viz_sender.send_raw(data, size);
     });
 
