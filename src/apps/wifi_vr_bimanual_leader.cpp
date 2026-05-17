@@ -328,9 +328,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         csv_log << "timestamp_sec,side,packet_version,grip,trigger,telemetry_age_ms,"
-                << "delta_pos_openxr_x,delta_pos_openxr_y,delta_pos_openxr_z,"
+                << "delta_pos_hmd_x,delta_pos_hmd_y,delta_pos_hmd_z,"
                 << "delta_pos_robot_x,delta_pos_robot_y,delta_pos_robot_z,"
-                << "delta_rot_openxr_axis_x,delta_rot_openxr_axis_y,delta_rot_openxr_axis_z,delta_rot_openxr_angle,"
+                << "delta_rot_hmd_axis_x,delta_rot_hmd_axis_y,delta_rot_hmd_axis_z,delta_rot_hmd_angle,"
                 << "delta_rot_robot_axis_x,delta_rot_robot_axis_y,delta_rot_robot_axis_z,delta_rot_robot_angle,"
                 << "target_pos_x,target_pos_y,target_pos_z,current_pos_x,current_pos_y,current_pos_z,"
                 << "target_quat_x,target_quat_y,target_quat_z,target_quat_w,current_quat_x,current_quat_y,current_quat_z,current_quat_w,"
@@ -368,13 +368,16 @@ int main(int argc, char** argv) {
         bool estop = false;
         bool recenter = false;
         struct Arm {
-            Eigen::Vector3d delta_pos_openxr = Eigen::Vector3d::Zero();
-            Eigen::Quaterniond delta_rot_openxr = Eigen::Quaterniond::Identity();
+            Eigen::Vector3d delta_pos_hmd = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond delta_rot_hmd = Eigen::Quaterniond::Identity();
             Eigen::Vector3d delta_pos_robot = Eigen::Vector3d::Zero();
             Eigen::Quaterniond delta_rot_robot = Eigen::Quaterniond::Identity();
             float grip = 0;
             float trigger = 0;
             uint8_t buttons = 0;
+            float thumbstick[2] = {0.0f, 0.0f};
+            Eigen::Vector3d abs_pos_world = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond abs_rot_world = Eigen::Quaterniond::Identity();
         } left, right;
         Eigen::Vector3d hmd_pos = Eigen::Vector3d::Zero();
         Eigen::Quaterniond hmd_quat = Eigen::Quaterniond::Identity();
@@ -399,28 +402,32 @@ int main(int argc, char** argv) {
             current_vr_state.estop = false; // V2 can add estop field if needed
             current_vr_state.recenter = false; // V2 uses grip anchor logic in sender
             
-            auto fill_arm_v2 = [&](const float* p, const float* r, float g, float t, VrState::Arm& arm, const Eigen::Matrix3d& trans_mat, const Eigen::Matrix3d& rot_mat) {
-                arm.delta_pos_openxr = Eigen::Vector3d(p[0], p[1], p[2]);
-                arm.delta_rot_openxr = Eigen::Quaterniond(r[3], r[0], r[1], r[2]);
+            auto fill_arm_v2 = [&](const float* p, const float* r, float g, float t, const float* thumb, const float* abs_p, const float* abs_r, VrState::Arm& arm, const Eigen::Matrix3d& trans_mat, const Eigen::Matrix3d& rot_mat) {
+                arm.delta_pos_hmd = Eigen::Vector3d(p[0], p[1], p[2]);
+                arm.delta_rot_hmd = Eigen::Quaterniond(r[3], r[0], r[1], r[2]);
                 
                 // MAPPING (Phase 3)
                 Eigen::Vector3d scale(cfg.mapping.position_scale_xyz[0], cfg.mapping.position_scale_xyz[1], cfg.mapping.position_scale_xyz[2]);
-                arm.delta_pos_robot = trans_mat * (scale.array() * arm.delta_pos_openxr.array()).matrix();
-                arm.delta_rot_robot = Eigen::Quaterniond(rot_mat * arm.delta_rot_openxr.toRotationMatrix() * rot_mat.transpose());
+                arm.delta_pos_robot = trans_mat * (scale.array() * arm.delta_pos_hmd.array()).matrix();
+                arm.delta_rot_robot = Eigen::Quaterniond(rot_mat * arm.delta_rot_hmd.toRotationMatrix() * rot_mat.transpose());
                 if (cfg.mapping.invert_rotation_delta) {
                     arm.delta_rot_robot = arm.delta_rot_robot.conjugate();
                 }
                 
                 arm.grip = g;
                 arm.trigger = t;
+                arm.thumbstick[0] = thumb[0];
+                arm.thumbstick[1] = thumb[1];
+                arm.abs_pos_world = Eigen::Vector3d(abs_p[0], abs_p[1], abs_p[2]);
+                arm.abs_rot_world = Eigen::Quaterniond(abs_r[3], abs_r[0], abs_r[1], abs_r[2]);
             };
-            fill_arm_v2(pkt->left_delta_pos_openxr, pkt->left_delta_rot_openxr_xyzw, pkt->left_grip, pkt->left_trigger, current_vr_state.left, cfg.mapping.left_translation_matrix, cfg.mapping.left_rotation_matrix);
+            fill_arm_v2(pkt->left_delta_pos_hmd, pkt->left_delta_rot_hmd_xyzw, pkt->left_grip, pkt->left_trigger, pkt->left_thumbstick, pkt->left_abs_pos_world, pkt->left_abs_rot_world_xyzw, current_vr_state.left, cfg.mapping.left_translation_matrix, cfg.mapping.left_rotation_matrix);
             current_vr_state.left.buttons = pkt->left_buttons;
-            fill_arm_v2(pkt->right_delta_pos_openxr, pkt->right_delta_rot_openxr_xyzw, pkt->right_grip, pkt->right_trigger, current_vr_state.right, cfg.mapping.right_translation_matrix, cfg.mapping.right_rotation_matrix);
+            fill_arm_v2(pkt->right_delta_pos_hmd, pkt->right_delta_rot_hmd_xyzw, pkt->right_grip, pkt->right_trigger, pkt->right_thumbstick, pkt->right_abs_pos_world, pkt->right_abs_rot_world_xyzw, current_vr_state.right, cfg.mapping.right_translation_matrix, cfg.mapping.right_rotation_matrix);
             current_vr_state.right.buttons = pkt->right_buttons;
             
-            current_vr_state.hmd_pos = Eigen::Vector3d(pkt->hmd_pos_openxr[0], pkt->hmd_pos_openxr[1], pkt->hmd_pos_openxr[2]);
-            current_vr_state.hmd_quat = Eigen::Quaterniond(pkt->hmd_quat_openxr_xyzw[3], pkt->hmd_quat_openxr_xyzw[0], pkt->hmd_quat_openxr_xyzw[1], pkt->hmd_quat_openxr_xyzw[2]);
+            current_vr_state.hmd_pos = Eigen::Vector3d(pkt->hmd_abs_pos_world[0], pkt->hmd_abs_pos_world[1], pkt->hmd_abs_pos_world[2]);
+            current_vr_state.hmd_quat = Eigen::Quaterniond(pkt->hmd_abs_quat_world_xyzw[3], pkt->hmd_abs_quat_world_xyzw[0], pkt->hmd_abs_quat_world_xyzw[1], pkt->hmd_abs_quat_world_xyzw[2]);
             
             vr_connected = true;
             last_vr_time = std::chrono::steady_clock::now();
@@ -674,8 +681,8 @@ int main(int argc, char** argv) {
                         std::stringstream log_ss;
                         log_ss << "--- IK DEBUG (" << (side == net::ArmSide::RIGHT ? "RIGHT" : "LEFT") << ") ---";
                         if (vr_pkt.version == 2) {
-                            Eigen::AngleAxisd raw_aa(arm_state.delta_rot_openxr);
-                            log_ss << "\n  [Packet V2 Raw] Pos: " << arm_state.delta_pos_openxr.transpose() 
+                            Eigen::AngleAxisd raw_aa(arm_state.delta_rot_hmd);
+                            log_ss << "\n  [Packet V2 HMD] Raw Pos: " << arm_state.delta_pos_hmd.transpose() 
                                    << " | Rot (AA): " << raw_aa.axis().transpose() << " | " << raw_aa.angle() << " rad";
                         }
                         Eigen::AngleAxisd mapped_aa(arm_state.delta_rot_robot);
@@ -687,7 +694,7 @@ int main(int argc, char** argv) {
                         
                         LOG_INFO(log_ss.str());
                         if (csv_log) {
-                            Eigen::AngleAxisd raw_aa(arm_state.delta_rot_openxr);
+                            Eigen::AngleAxisd raw_aa(arm_state.delta_rot_hmd);
                             Eigen::AngleAxisd mapped_aa(arm_state.delta_rot_robot);
                             double dq_norm = 0.0;
                             bool nan_rejected = false;
@@ -702,7 +709,7 @@ int main(int argc, char** argv) {
                                     << (side == net::ArmSide::RIGHT ? "right" : "left") << ','
                                     << vr_pkt.version << ','
                                     << arm_state.grip << ',' << arm_state.trigger << ',' << telemetry_age_ms << ','
-                                    << arm_state.delta_pos_openxr.x() << ',' << arm_state.delta_pos_openxr.y() << ',' << arm_state.delta_pos_openxr.z() << ','
+                                    << arm_state.delta_pos_hmd.x() << ',' << arm_state.delta_pos_hmd.y() << ',' << arm_state.delta_pos_hmd.z() << ','
                                     << delta_pos_robot.x() << ',' << delta_pos_robot.y() << ',' << delta_pos_robot.z() << ','
                                     << raw_aa.axis().x() << ',' << raw_aa.axis().y() << ',' << raw_aa.axis().z() << ',' << raw_aa.angle() << ','
                                     << mapped_aa.axis().x() << ',' << mapped_aa.axis().y() << ',' << mapped_aa.axis().z() << ',' << mapped_aa.angle() << ','
@@ -801,11 +808,13 @@ int main(int argc, char** argv) {
             };
 
             log_arm("RIGHT", vr_pkt.right.grip > 0.5, vr_pkt.right.buttons, vr_pkt.right.delta_pos_robot, fb_r, target_q_r, right_ik_success);
+            std::cout << "  Stick (R): (" << vr_pkt.right.thumbstick[0] << ", " << vr_pkt.right.thumbstick[1] << ")" << std::endl;
             log_arm("LEFT ", vr_pkt.left.grip > 0.5, vr_pkt.left.buttons, vr_pkt.left.delta_pos_robot, fb_l, target_q_l, left_ik_success);
+            std::cout << "  Stick (L): (" << vr_pkt.left.thumbstick[0] << ", " << vr_pkt.left.thumbstick[1] << ")" << std::endl;
             
             if (vr_pkt.version == 2) {
-                std::cout << "V2 RAW (R): (" << vr_pkt.right.delta_pos_openxr.transpose() << ")" << std::endl;
-                std::cout << "V2 RAW (L): (" << vr_pkt.left.delta_pos_openxr.transpose() << ")" << std::endl;
+                std::cout << "V2 HMD RAW (R): (" << vr_pkt.right.delta_pos_hmd.transpose() << ")" << std::endl;
+                std::cout << "V2 HMD RAW (L): (" << vr_pkt.left.delta_pos_hmd.transpose() << ")" << std::endl;
             }
             
             last_log_time = now;

@@ -18,27 +18,35 @@ struct VrRelativeTeleopPacketV2 {
     uint32_t seq;
     double timestamp_sec;
 
-    float right_delta_pos_openxr[3];
-    float right_delta_rot_openxr_xyzw[4];
+    // HMD World Poses
+    float hmd_abs_pos_world[3];
+    float hmd_abs_quat_world_xyzw[4];
 
-    float left_delta_pos_openxr[3];
-    float left_delta_rot_openxr_xyzw[4];
-
-    float hmd_pos_openxr[3];
-    float hmd_quat_openxr_xyzw[4];
-
-    float right_grip;
+    // Left Arm Data
+    float left_delta_pos_world[3];
+    float left_delta_rot_world_xyzw[4];
+    float left_delta_pos_hmd[3];
+    float left_delta_rot_hmd_xyzw[4];
+    float left_abs_pos_world[3];
+    float left_abs_rot_world_xyzw[4];
     float left_grip;
-    float right_trigger;
     float left_trigger;
-
-    // Buttons (Bitmask)
-    // Right: Bit 0=A, Bit 1=B, Bit 2=Menu
-    // Left:  Bit 0=X, Bit 1=Y, Bit 2=Menu
-    uint8_t right_buttons;
+    float left_thumbstick[2];
     uint8_t left_buttons;
-    uint16_t reserved;
 
+    // Right Arm Data
+    float right_delta_pos_world[3];
+    float right_delta_rot_world_xyzw[4];
+    float right_delta_pos_hmd[3];
+    float right_delta_rot_hmd_xyzw[4];
+    float right_abs_pos_world[3];
+    float right_abs_rot_world_xyzw[4];
+    float right_grip;
+    float right_trigger;
+    float right_thumbstick[2];
+    uint8_t right_buttons;
+
+    uint16_t reserved;
     uint32_t crc32;
 };
 
