@@ -3,8 +3,8 @@ vr_mapping:
   max_delta_m: 0.35
   deadband_m: 0.002
   max_delta_per_cycle_m: 0.015
-  gripper_min_limit: 0.0
-  gripper_max_limit: 0.044
+  gripper_min_limit: 0.044
+  gripper_max_limit: 0.0
 
   # OpenXR local: +X right, +Y up, -Z forward.
   # Robot base: +X forward, +Y left, +Z up.

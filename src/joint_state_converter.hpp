@@ -87,7 +87,9 @@ public:
     std::vector<JointState> motor_to_joint(const std::vector<MotorState>& m) const override {
         std::vector<JointState> j(m.size());
         for (size_t i = 0; i < m.size(); ++i) {
-            j[i] = {m[i].position, m[i].velocity, m[i].effort};
+            double motor_pos = m[i].position;
+            double joint_pos = 0.044 * (motor_pos / -1.0472);
+            j[i] = {joint_pos, m[i].velocity, m[i].effort};
         }
         return j;
     }
@@ -95,7 +97,9 @@ public:
     std::vector<MotorState> joint_to_motor(const std::vector<JointState>& j) const override {
         std::vector<MotorState> m(j.size());
         for (size_t i = 0; i < j.size(); ++i) {
-            m[i] = {j[i].position, j[i].velocity, j[i].effort};
+            double joint_pos = j[i].position;
+            double motor_pos = (joint_pos / 0.044) * -1.0472;
+            m[i] = {motor_pos, j[i].velocity, j[i].effort};
         }
         return m;
     }
