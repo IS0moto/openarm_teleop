@@ -70,6 +70,8 @@ struct VrTeleopConfig {
         Eigen::Matrix3d left_rotation_matrix = Eigen::Matrix3d::Identity();
         bool invert_rotation_delta = false;
         std::string rotation_compose_order = "anchor_then_delta"; // or "delta_then_anchor"
+        double gripper_min_limit = 0.0;
+        double gripper_max_limit = 0.044;
     } mapping;
 
     struct IKConfig {
@@ -153,6 +155,8 @@ VrTeleopConfig load_config(const std::string& path) {
             load_matrix("left_rotation_matrix", cfg.mapping.left_rotation_matrix);
             if (m["invert_rotation_delta"]) cfg.mapping.invert_rotation_delta = m["invert_rotation_delta"].as<bool>();
             if (m["rotation_compose_order"]) cfg.mapping.rotation_compose_order = m["rotation_compose_order"].as<std::string>();
+            if (m["gripper_min_limit"]) cfg.mapping.gripper_min_limit = m["gripper_min_limit"].as<double>();
+            if (m["gripper_max_limit"]) cfg.mapping.gripper_max_limit = m["gripper_max_limit"].as<double>();
         }
         if (node["ik"]) {
             auto i = node["ik"];
@@ -545,7 +549,7 @@ int main(int argc, char** argv) {
             }
 
             const VrState::Arm& arm_state = (side == net::ArmSide::RIGHT) ? vr_pkt.right : vr_pkt.left;
-            grip_target = arm_state.trigger;
+            grip_target = cfg.mapping.gripper_min_limit + arm_state.trigger * (cfg.mapping.gripper_max_limit - cfg.mapping.gripper_min_limit);
 
             bool feedback_available = tel_connected || dry_run;
             if (arm_state.grip > 0.5 && feedback_available) {
