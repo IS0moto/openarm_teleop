@@ -105,3 +105,4 @@ add_wifi_teleop_app(wifi_single_leader src/apps/wifi_single_leader.cpp)
 add_wifi_teleop_app(wifi_single_follower src/apps/wifi_single_follower.cpp)
 
 add_executable(telemetry_fanout tools/telemetry_fanout.cpp)
+add_executable(udp_fanout tools/udp_fanout.cpp)
