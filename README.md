@@ -41,7 +41,7 @@ The Quest sender lives in the sibling repository directory:
 
 ```bash
 cd openarm_wifi_bimanual_teleop
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 ```
 
@@ -54,7 +54,7 @@ The current CMake file expects the OpenArm CAN install at:
 If your workspace differs, override `OPENARM_CAN_DIR` instead of hardcoding the path in `CMakeLists.txt`, for example with:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENARM_CAN_DIR=/path/to/openarm_can
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -D OPENARM_CAN_DIR=/path/to/openarm_can
 ```
 
 ## Safety Notes
