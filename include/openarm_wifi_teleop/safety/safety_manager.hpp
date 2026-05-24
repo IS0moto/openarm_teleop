@@ -2,6 +2,7 @@
 #include "openarm_wifi_teleop/net/teleop_packet.hpp"
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 namespace openarm_wifi_teleop {
 namespace safety {

@@ -22,7 +22,8 @@ sudo apt install -y \
   build-essential cmake pkg-config \
   libeigen3-dev libyaml-cpp-dev \
   liborocos-kdl-dev liburdfdom-dev liburdfdom-headers-dev \
-  iperf3 can-utils ros-humble-pinocchio
+  iperf3 can-utils ros-humble-pinocchio \
+  libcli11-dev
 ```
 
 Install Pinocchio using the method used by your OpenArm workspace. The CMake project calls:
@@ -41,20 +42,20 @@ You can override the path by environment variable or CMake option:
 
 ```bash
 export OPENARM_CAN_DIR=/path/to/openarm_can
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
 ```
 
 or directly:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENARM_CAN_DIR=/path/to/openarm_can
+cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -D OPENARM_CAN_DIR=/path/to/openarm_can
 ```
 
 ## Build
 
 ```bash
 cd openarm_wifi_bimanual_teleop
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 ```
 
