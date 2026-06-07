@@ -31,6 +31,8 @@ using namespace openarm_wifi_teleop;
 std::atomic<bool> keep_running(true);
 std::atomic<bool> init_position_requested(false);
 std::atomic<bool> init_position_in_progress(false);
+std::atomic<bool> recover_estop_requested(false);
+std::atomic<bool> recover_estop_in_progress(false);
 core::TeleopStateBuffer state_buffer_r;
 core::TeleopStateBuffer state_buffer_l;
 std::unique_ptr<safety::SafetyManager> safety_mgr_r;
@@ -182,6 +184,8 @@ int main(int argc, char** argv) {
                 "\"left_state\":\"" + std::string(safety_state_to_str(l_state)) + "\","
                 "\"init_requested\":" + std::string(init_position_requested ? "true" : "false") + ","
                 "\"init_in_progress\":" + std::string(init_position_in_progress ? "true" : "false") + ","
+                "\"recover_requested\":" + std::string(recover_estop_requested ? "true" : "false") + ","
+                "\"recover_in_progress\":" + std::string(recover_estop_in_progress ? "true" : "false") + ","
                 "\"running\":" + std::string(keep_running ? "true" : "false")
             );
         });
@@ -198,6 +202,10 @@ int main(int argc, char** argv) {
             if (safety_mgr_r) safety_mgr_r->trigger_estop();
             if (safety_mgr_l) safety_mgr_l->trigger_estop();
             return control::json_ok("\"message\":\"follower estop triggered\"");
+        });
+        runtime_control->register_handler("recover_estop", [&](const std::string&) {
+            recover_estop_requested = true;
+            return control::json_ok("\"message\":\"follower estop recovery requested\"");
         });
         runtime_control->register_handler("shutdown", [&](const std::string&) {
             keep_running = false;
@@ -305,6 +313,27 @@ int main(int argc, char** argv) {
     auto print_time = std::chrono::steady_clock::now();
 
     while (keep_running) {
+        if (recover_estop_requested.exchange(false)) {
+            recover_estop_in_progress = true;
+            LOG_INFO("Runtime recover_estop requested for follower arms.");
+            if (!mock && follower_arm_r && follower_arm_l && control_r && control_l) {
+                follower_arm_r->enable_all();
+                follower_arm_l->enable_all();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                follower_arm_r->recv_all();
+                follower_arm_l->recv_all();
+
+                std::thread thread_r(&Control::AdjustPosition, control_r);
+                std::thread thread_l(&Control::AdjustPosition, control_l);
+                thread_r.join();
+                thread_l.join();
+            }
+            if (safety_mgr_r) safety_mgr_r->reset();
+            if (safety_mgr_l) safety_mgr_l->reset();
+            recover_estop_in_progress = false;
+            LOG_INFO("Runtime follower recover_estop complete.");
+        }
+
         if (init_position_requested.exchange(false)) {
             init_position_in_progress = true;
             LOG_INFO("Runtime init_position requested for follower arms.");

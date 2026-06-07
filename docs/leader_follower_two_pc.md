@@ -53,7 +53,9 @@ sudo openarm-can-cli -i can1 can_configure
   --left-port 50001 \
   --control-rate-hz 500 \
   --watchdog-hold-ms 50 \
-  --watchdog-disable-ms 1000
+  --watchdog-disable-ms 1000 \
+  --control-bind-ip 0.0.0.0 \
+  --control-port 53200
 ```
 
 Add telemetry when using VR, recording, or remote monitoring:
@@ -62,7 +64,7 @@ Add telemetry when using VR, recording, or remote monitoring:
   --publish-telemetry \
   --telemetry-ip <LEADER_PC_IP> \
   --telemetry-port 51000 \
-  --telemetry-rate-hz 100
+  --telemetry-rate-hz 100 
 ```
 
 Expected startup state before leader enable:
@@ -88,7 +90,9 @@ sudo openarm-can-configure-socketcan can1 -fd
   --right-port 50000 \
   --left-port 50001 \
   --rate-hz 500 \
-  --enable
+  --enable \
+  --control-bind-ip 0.0.0.0 \
+  --control-port 53201
 ```
 
 Use `--rate-hz 250` for first tests. Increase to `500` after network and watchdog behavior are stable.
