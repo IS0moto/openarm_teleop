@@ -455,6 +455,22 @@ bool Control::AdjustPosition(void) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
         openarm_->recv_all();
+
+        std::vector<MotorState> arm_motor_states_now;
+        for (const auto& motor : openarm_->get_arm().get_motors()) {
+            arm_motor_states_now.push_back({motor.get_position(), motor.get_velocity(), 0.0});
+        }
+        std::vector<MotorState> gripper_motor_states_now;
+        for (const auto& motor : openarm_->get_gripper().get_motors()) {
+            gripper_motor_states_now.push_back({motor.get_position(), motor.get_velocity(), 0.0});
+        }
+        std::vector<JointState> joint_arm_now_step =
+            openarmjointconverter_->motor_to_joint(arm_motor_states_now);
+        std::vector<JointState> joint_hand_now_step =
+            openarmgripperjointconverter_->motor_to_joint(gripper_motor_states_now);
+
+        robot_state_->arm_state().set_all_responses(joint_arm_now_step);
+        robot_state_->hand_state().set_all_responses(joint_hand_now_step);
     }
 
     std::vector<MotorState> arm_motor_states_final;
@@ -474,6 +490,8 @@ bool Control::AdjustPosition(void) {
 
     robot_state_->arm_state().set_all_references(joint_arm_final);
     robot_state_->hand_state().set_all_references(joint_hand_final);
+    robot_state_->arm_state().set_all_responses(joint_arm_final);
+    robot_state_->hand_state().set_all_responses(joint_hand_final);
 
     return true;
 }

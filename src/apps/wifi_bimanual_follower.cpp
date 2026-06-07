@@ -319,34 +319,50 @@ int main(int argc, char** argv) {
             if (!mock && follower_arm_r && follower_arm_l && control_r && control_l) {
                 follower_arm_r->enable_all();
                 follower_arm_l->enable_all();
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                follower_arm_r->recv_all();
-                follower_arm_l->recv_all();
+                std::thread([follower_arm_r, follower_arm_l, control_r, control_l]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    follower_arm_r->recv_all();
+                    follower_arm_l->recv_all();
 
-                std::thread thread_r(&Control::AdjustPosition, control_r);
-                std::thread thread_l(&Control::AdjustPosition, control_l);
-                thread_r.join();
-                thread_l.join();
+                    std::thread thread_r(&Control::AdjustPosition, control_r);
+                    std::thread thread_l(&Control::AdjustPosition, control_l);
+                    thread_r.join();
+                    thread_l.join();
+
+                    if (safety_mgr_r) safety_mgr_r->reset();
+                    if (safety_mgr_l) safety_mgr_l->reset();
+                    recover_estop_in_progress = false;
+                    LOG_INFO("Runtime follower recover_estop complete.");
+                }).detach();
+            } else {
+                if (safety_mgr_r) safety_mgr_r->reset();
+                if (safety_mgr_l) safety_mgr_l->reset();
+                recover_estop_in_progress = false;
+                LOG_INFO("Runtime follower recover_estop complete (mock/no-op).");
             }
-            if (safety_mgr_r) safety_mgr_r->reset();
-            if (safety_mgr_l) safety_mgr_l->reset();
-            recover_estop_in_progress = false;
-            LOG_INFO("Runtime follower recover_estop complete.");
         }
 
         if (init_position_requested.exchange(false)) {
             init_position_in_progress = true;
             LOG_INFO("Runtime init_position requested for follower arms.");
             if (!mock && control_r && control_l) {
-                std::thread thread_r(&Control::AdjustPosition, control_r);
-                std::thread thread_l(&Control::AdjustPosition, control_l);
-                thread_r.join();
-                thread_l.join();
+                std::thread([control_r, control_l]() {
+                    std::thread thread_r(&Control::AdjustPosition, control_r);
+                    std::thread thread_l(&Control::AdjustPosition, control_l);
+                    thread_r.join();
+                    thread_l.join();
+
+                    if (safety_mgr_r) safety_mgr_r->reset();
+                    if (safety_mgr_l) safety_mgr_l->reset();
+                    init_position_in_progress = false;
+                    LOG_INFO("Runtime follower init_position complete.");
+                }).detach();
+            } else {
+                if (safety_mgr_r) safety_mgr_r->reset();
+                if (safety_mgr_l) safety_mgr_l->reset();
+                init_position_in_progress = false;
+                LOG_INFO("Runtime follower init_position complete (mock/no-op).");
             }
-            if (safety_mgr_r) safety_mgr_r->reset();
-            if (safety_mgr_l) safety_mgr_l->reset();
-            init_position_in_progress = false;
-            LOG_INFO("Runtime follower init_position complete.");
         }
 
         net::TeleopPacket target_r, target_l;
@@ -370,7 +386,7 @@ int main(int argc, char** argv) {
         safety::SafetyState state_r_st = safety_mgr_r->get_state();
         safety::SafetyState state_l_st = safety_mgr_l->get_state();
 
-        if (!mock) {
+        if (!mock && !init_position_in_progress && !recover_estop_in_progress) {
             // Right
             if (state_r_st == safety::SafetyState::ACTIVE || state_r_st == safety::SafetyState::READY || state_r_st == safety::SafetyState::WARNING_TIMEOUT) {
                 if (has_r) {
