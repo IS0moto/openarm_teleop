@@ -73,6 +73,7 @@ add_library(openarm_wifi_teleop_lib STATIC
     src/utils/logging.cpp
     src/telemetry/openarm_telemetry_publisher.cpp
     src/ik/openarm_pinocchio_ik.cpp
+    src/control/runtime_control_server.cpp
     src/safety/watchdog.cpp
     src/safety/rate_limiter.cpp
     src/safety/safety_manager.cpp

@@ -10,6 +10,7 @@
 
 #include "openarm_wifi_teleop/net/udp_sender.hpp"
 #include "openarm_wifi_teleop/net/packet_codec.hpp"
+#include "openarm_wifi_teleop/control/runtime_control_server.hpp"
 #include "openarm_wifi_teleop/utils/logging.hpp"
 #include "openarm_wifi_teleop/utils/network.hpp"
 #include "openarm_wifi_teleop/utils/time.hpp"
@@ -26,6 +27,9 @@
 using namespace openarm_wifi_teleop;
 
 std::atomic<bool> keep_running(true);
+std::atomic<bool> command_enabled(false);
+std::atomic<bool> init_position_requested(false);
+std::atomic<bool> init_position_in_progress(false);
 
 void signal_handler(int) {
     LOG_INFO("Ctrl+C detected. Shutting down...");
@@ -89,7 +93,7 @@ int main(int argc, char** argv) {
     uint16_t right_port = 50000;
     uint16_t left_port = 50001;
     double rate_hz = 500.0;
-    bool enable = false;
+    bool initial_enable = false;
     bool mock = false;
     std::string bind_ip = "0.0.0.0";
     std::string interface_name = "";
@@ -102,6 +106,8 @@ int main(int argc, char** argv) {
     std::string telemetry_ip = "127.0.0.1";
     uint16_t telemetry_port = 51000;
     double telemetry_rate_hz = 100.0;
+    std::string control_bind_ip = "0.0.0.0";
+    uint16_t control_port = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -117,13 +123,17 @@ int main(int argc, char** argv) {
         else if (arg == "--interface" && i + 1 < argc) interface_name = argv[++i];
         else if (arg == "--local-port-r" && i + 1 < argc) local_port_r = std::stoi(argv[++i]);
         else if (arg == "--local-port-l" && i + 1 < argc) local_port_l = std::stoi(argv[++i]);
-        else if (arg == "--enable") enable = true;
+        else if (arg == "--enable") initial_enable = true;
         else if (arg == "--mock") mock = true;
         else if (arg == "--publish-telemetry") publish_telemetry = true;
         else if (arg == "--telemetry-ip" && i + 1 < argc) telemetry_ip = argv[++i];
         else if (arg == "--telemetry-port" && i + 1 < argc) telemetry_port = std::stoi(argv[++i]);
         else if (arg == "--telemetry-rate-hz" && i + 1 < argc) telemetry_rate_hz = std::stod(argv[++i]);
+        else if (arg == "--control-bind-ip" && i + 1 < argc) control_bind_ip = argv[++i];
+        else if (arg == "--control-port" && i + 1 < argc) control_port = std::stoi(argv[++i]);
     }
+
+    command_enabled = initial_enable;
 
     if (!interface_name.empty()) {
         std::string ip = utils::get_interface_ip(interface_name);
@@ -237,7 +247,60 @@ int main(int argc, char** argv) {
                  << " at " << telemetry_rate_hz << " Hz");
     }
 
+    std::unique_ptr<control::RuntimeControlServer> runtime_control;
+    if (control_port > 0) {
+        runtime_control = std::make_unique<control::RuntimeControlServer>(control_bind_ip, control_port);
+        runtime_control->register_handler("status", [&](const std::string&) {
+            return control::json_ok(
+                "\"role\":\"leader\","
+                "\"enabled\":" + std::string(command_enabled ? "true" : "false") + ","
+                "\"init_requested\":" + std::string(init_position_requested ? "true" : "false") + ","
+                "\"init_in_progress\":" + std::string(init_position_in_progress ? "true" : "false") + ","
+                "\"running\":" + std::string(keep_running ? "true" : "false")
+            );
+        });
+        runtime_control->register_handler("disable", [&](const std::string&) {
+            command_enabled = false;
+            return control::json_ok("\"message\":\"leader disabled\"");
+        });
+        runtime_control->register_handler("enable", [&](const std::string&) {
+            command_enabled = true;
+            return control::json_ok("\"message\":\"leader enabled\"");
+        });
+        runtime_control->register_handler("init_position", [&](const std::string&) {
+            init_position_requested = true;
+            return control::json_ok("\"message\":\"leader init_position requested\"");
+        });
+        runtime_control->register_handler("estop", [&](const std::string&) {
+            command_enabled = false;
+            keep_running = false;
+            return control::json_ok("\"message\":\"leader estop requested\"");
+        });
+        runtime_control->register_handler("shutdown", [&](const std::string&) {
+            command_enabled = false;
+            keep_running = false;
+            return control::json_ok("\"message\":\"leader shutdown requested\"");
+        });
+        if (!runtime_control->start()) {
+            LOG_ERROR("Failed to start leader runtime control server.");
+            return 1;
+        }
+    }
+
     while (keep_running) {
+        if (init_position_requested.exchange(false)) {
+            init_position_in_progress = true;
+            LOG_INFO("Runtime init_position requested for leader arms.");
+            if (!mock && control_r && control_l) {
+                std::thread thread_r(&Control::AdjustPosition, control_r);
+                std::thread thread_l(&Control::AdjustPosition, control_l);
+                thread_r.join();
+                thread_l.join();
+            }
+            init_position_in_progress = false;
+            LOG_INFO("Runtime leader init_position complete.");
+        }
+
         net::TeleopPacket pkt_r, pkt_l;
         std::memset(&pkt_r, 0, sizeof(pkt_r));
         std::memset(&pkt_l, 0, sizeof(pkt_l));
@@ -284,13 +347,13 @@ int main(int argc, char** argv) {
         pkt_r.seq = seq;
         pkt_r.arm_side = static_cast<uint8_t>(net::ArmSide::RIGHT);
         pkt_r.mode = static_cast<uint8_t>(net::ControlMode::UNILATERAL);
-        pkt_r.enable = enable ? 1 : 0;
+        pkt_r.enable = command_enabled ? 1 : 0;
         pkt_r.estop = 0;
 
         pkt_l.seq = seq;
         pkt_l.arm_side = static_cast<uint8_t>(net::ArmSide::LEFT);
         pkt_l.mode = static_cast<uint8_t>(net::ControlMode::UNILATERAL);
-        pkt_l.enable = enable ? 1 : 0;
+        pkt_l.enable = command_enabled ? 1 : 0;
         pkt_l.estop = 0;
         
         seq++;
@@ -313,7 +376,7 @@ int main(int argc, char** argv) {
             tpkt.monotonic_time_ns = utils::now_ns();
             tpkt.robot_type    = 1;  // openarm_bimanual
             tpkt.control_mode  = 1;  // unilateral_wifi
-            tpkt.enabled       = enable ? 1 : 0;
+            tpkt.enabled       = command_enabled ? 1 : 0;
             tpkt.estop         = 0;
             tpkt.state_dim     = 16;
             tpkt.action_dim    = 16;

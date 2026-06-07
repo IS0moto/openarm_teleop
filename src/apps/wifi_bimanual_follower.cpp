@@ -12,6 +12,7 @@
 #include "openarm_wifi_teleop/core/teleop_state_buffer.hpp"
 #include "openarm_wifi_teleop/safety/safety_manager.hpp"
 #include "openarm_wifi_teleop/safety/rate_limiter.hpp"
+#include "openarm_wifi_teleop/control/runtime_control_server.hpp"
 #include "openarm_wifi_teleop/utils/logging.hpp"
 #include "openarm_wifi_teleop/utils/network.hpp"
 #include "openarm_wifi_teleop/utils/time.hpp"
@@ -28,6 +29,8 @@
 using namespace openarm_wifi_teleop;
 
 std::atomic<bool> keep_running(true);
+std::atomic<bool> init_position_requested(false);
+std::atomic<bool> init_position_in_progress(false);
 core::TeleopStateBuffer state_buffer_r;
 core::TeleopStateBuffer state_buffer_l;
 std::unique_ptr<safety::SafetyManager> safety_mgr_r;
@@ -42,6 +45,20 @@ void signal_handler(int) {
 
 void packet_callback_r(const net::TeleopPacket& packet) { state_buffer_r.update(packet); }
 void packet_callback_l(const net::TeleopPacket& packet) { state_buffer_l.update(packet); }
+
+const char* safety_state_to_str(safety::SafetyState s) {
+    switch(s) {
+        case safety::SafetyState::DISABLED: return "DISABLED";
+        case safety::SafetyState::WAITING_FOR_ENABLE: return "WAIT_EN";
+        case safety::SafetyState::READY: return "READY";
+        case safety::SafetyState::ACTIVE: return "ACTIVE";
+        case safety::SafetyState::WARNING_TIMEOUT: return "WARN";
+        case safety::SafetyState::HOLD: return "HOLD";
+        case safety::SafetyState::ESTOP: return "ESTOP";
+        case safety::SafetyState::FAULT: return "FAULT";
+        default: return "UNKNOWN";
+    }
+}
 
 // Verify that motors on a CAN bus are actually responding
 bool verify_arm_hardware(openarm::can::socket::OpenArm* arm, const std::string& can_name, const std::string& arm_label) {
@@ -109,6 +126,8 @@ int main(int argc, char** argv) {
     uint16_t telemetry_port = 51000;
     double telemetry_rate_hz = 100.0;
     bool telemetry_log_stats = false;
+    std::string control_bind_ip = "0.0.0.0";
+    uint16_t control_port = 0;
     
     safety::SafetyConfig safety_config;
 
@@ -130,6 +149,8 @@ int main(int argc, char** argv) {
         else if (arg == "--telemetry-port" && i + 1 < argc) telemetry_port = std::stoi(argv[++i]);
         else if (arg == "--telemetry-rate-hz" && i + 1 < argc) telemetry_rate_hz = std::stod(argv[++i]);
         else if (arg == "--telemetry-log-stats") telemetry_log_stats = true;
+        else if (arg == "--control-bind-ip" && i + 1 < argc) control_bind_ip = argv[++i];
+        else if (arg == "--control-port" && i + 1 < argc) control_port = std::stoi(argv[++i]);
         else if (arg == "--mock") mock = true;
     }
 
@@ -148,6 +169,45 @@ int main(int argc, char** argv) {
 
     safety_mgr_r = std::make_unique<safety::SafetyManager>(safety_config, "RIGHT");
     safety_mgr_l = std::make_unique<safety::SafetyManager>(safety_config, "LEFT");
+
+    std::unique_ptr<control::RuntimeControlServer> runtime_control;
+    if (control_port > 0) {
+        runtime_control = std::make_unique<control::RuntimeControlServer>(control_bind_ip, control_port);
+        runtime_control->register_handler("status", [&](const std::string&) {
+            const auto r_state = safety_mgr_r ? safety_mgr_r->get_state() : safety::SafetyState::DISABLED;
+            const auto l_state = safety_mgr_l ? safety_mgr_l->get_state() : safety::SafetyState::DISABLED;
+            return control::json_ok(
+                "\"role\":\"follower\","
+                "\"right_state\":\"" + std::string(safety_state_to_str(r_state)) + "\","
+                "\"left_state\":\"" + std::string(safety_state_to_str(l_state)) + "\","
+                "\"init_requested\":" + std::string(init_position_requested ? "true" : "false") + ","
+                "\"init_in_progress\":" + std::string(init_position_in_progress ? "true" : "false") + ","
+                "\"running\":" + std::string(keep_running ? "true" : "false")
+            );
+        });
+        runtime_control->register_handler("init_position", [&](const std::string&) {
+            init_position_requested = true;
+            return control::json_ok("\"message\":\"follower init_position requested\"");
+        });
+        runtime_control->register_handler("reset_safety", [&](const std::string&) {
+            if (safety_mgr_r) safety_mgr_r->reset();
+            if (safety_mgr_l) safety_mgr_l->reset();
+            return control::json_ok("\"message\":\"follower safety reset\"");
+        });
+        runtime_control->register_handler("estop", [&](const std::string&) {
+            if (safety_mgr_r) safety_mgr_r->trigger_estop();
+            if (safety_mgr_l) safety_mgr_l->trigger_estop();
+            return control::json_ok("\"message\":\"follower estop triggered\"");
+        });
+        runtime_control->register_handler("shutdown", [&](const std::string&) {
+            keep_running = false;
+            return control::json_ok("\"message\":\"follower shutdown requested\"");
+        });
+        if (!runtime_control->start()) {
+            LOG_ERROR("Failed to start follower runtime control server.");
+            return 1;
+        }
+    }
     
     safety::RateLimiter rate_limiter_r(safety_config.max_target_delta_rad_per_cycle, safety_config.max_joint_velocity_rad_s, 1.0 / rate_hz);
     safety::RateLimiter rate_limiter_l(safety_config.max_target_delta_rad_per_cycle, safety_config.max_joint_velocity_rad_s, 1.0 / rate_hz);
@@ -245,6 +305,21 @@ int main(int argc, char** argv) {
     auto print_time = std::chrono::steady_clock::now();
 
     while (keep_running) {
+        if (init_position_requested.exchange(false)) {
+            init_position_in_progress = true;
+            LOG_INFO("Runtime init_position requested for follower arms.");
+            if (!mock && control_r && control_l) {
+                std::thread thread_r(&Control::AdjustPosition, control_r);
+                std::thread thread_l(&Control::AdjustPosition, control_l);
+                thread_r.join();
+                thread_l.join();
+            }
+            if (safety_mgr_r) safety_mgr_r->reset();
+            if (safety_mgr_l) safety_mgr_l->reset();
+            init_position_in_progress = false;
+            LOG_INFO("Runtime follower init_position complete.");
+        }
+
         net::TeleopPacket target_r, target_l;
         bool has_r = state_buffer_r.get_latest(target_r);
         bool has_l = state_buffer_l.get_latest(target_l);
@@ -330,21 +405,8 @@ int main(int argc, char** argv) {
 
         auto now = std::chrono::steady_clock::now();
         if (now - print_time > std::chrono::seconds(1)) {
-            auto state_to_str = [](safety::SafetyState s) {
-                switch(s) {
-                    case safety::SafetyState::DISABLED: return "DISABLED";
-                    case safety::SafetyState::WAITING_FOR_ENABLE: return "WAIT_EN";
-                    case safety::SafetyState::READY: return "READY";
-                    case safety::SafetyState::ACTIVE: return "ACTIVE";
-                    case safety::SafetyState::WARNING_TIMEOUT: return "WARN";
-                    case safety::SafetyState::HOLD: return "HOLD";
-                    case safety::SafetyState::ESTOP: return "ESTOP";
-                    case safety::SafetyState::FAULT: return "FAULT";
-                    default: return "UNKNOWN";
-                }
-            };
-            LOG_INFO("Status [R: " << state_to_str(state_r_st) << ", Loss: " << state_buffer_r.get_lost_packet_count() 
-                     << " | L: " << state_to_str(state_l_st) << ", Loss: " << state_buffer_l.get_lost_packet_count() << "]");
+            LOG_INFO("Status [R: " << safety_state_to_str(state_r_st) << ", Loss: " << state_buffer_r.get_lost_packet_count()
+                     << " | L: " << safety_state_to_str(state_l_st) << ", Loss: " << state_buffer_l.get_lost_packet_count() << "]");
             print_time = now;
         }
 

@@ -36,8 +36,12 @@ Aim for low jitter and no packet loss.
 
 ```bash
 cd openarm_wifi_bimanual_teleop
+# <旧コマンド>
 sudo openarm-can-configure-socketcan can0 -fd
 sudo openarm-can-configure-socketcan can1 -fd
+# <新コマンド>
+sudo openarm-can-cli -i can0 can_configure
+sudo openarm-can-cli -i can1 can_configure
 
 ./build/wifi_bimanual_follower \
   --interface <FOLLOWER_NET_IFACE> \

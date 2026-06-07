@@ -29,6 +29,14 @@ void SafetyManager::update(const net::TeleopPacket& latest_packet, double time_s
         return;
     }
 
+    if (config_.require_enable && latest_packet.enable == 0) {
+        if (state_ != SafetyState::WAITING_FOR_ENABLE) {
+            LOG_INFO("[" << arm_name_ << "] Enable signal cleared. Waiting for enable.");
+        }
+        state_ = SafetyState::WAITING_FOR_ENABLE;
+        return;
+    }
+
     Watchdog wd(config_.watchdog_warning_ms, config_.watchdog_hold_ms, config_.watchdog_disable_ms);
     Watchdog::Status wd_status = wd.check(time_since_last_packet_ms);
 
