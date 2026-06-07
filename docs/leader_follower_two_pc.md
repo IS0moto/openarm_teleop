@@ -58,7 +58,17 @@ sudo openarm-can-cli -i can1 can_configure
   --control-port 53200
 ```
 
-Add telemetry when using VR, recording, or remote monitoring:
+Add telemetry when using recording on the Follower PC:
+
+```bash
+  --publish-telemetry \
+  --telemetry-ip 127.0.0.1 \
+  --telemetry-port 51000 \
+  --telemetry-rate-hz 100
+```
+
+For remote monitoring or a VR leader running on the Leader PC, send telemetry to
+the Leader PC instead:
 
 ```bash
   --publish-telemetry \
