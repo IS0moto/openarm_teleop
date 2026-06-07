@@ -253,6 +253,9 @@ int main(int argc, char** argv) {
         runtime_control->register_handler("status", [&](const std::string&) {
             return control::json_ok(
                 "\"role\":\"leader\","
+                "\"follower_ip\":\"" + control::json_escape(follower_ip) + "\","
+                "\"right_port\":" + std::to_string(right_port) + ","
+                "\"left_port\":" + std::to_string(left_port) + ","
                 "\"enabled\":" + std::string(command_enabled ? "true" : "false") + ","
                 "\"init_requested\":" + std::string(init_position_requested ? "true" : "false") + ","
                 "\"init_in_progress\":" + std::string(init_position_in_progress ? "true" : "false") + ","
