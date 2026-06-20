@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
 
         auto now = std::chrono::steady_clock::now();
         if (now - print_time > std::chrono::seconds(1)) {
-            LOG_INFO("Sent " << sender.get_sent_count() << " packets.");
+            LOG_DEBUG("Sent " << sender.get_sent_count() << " packets.");
             print_time = now;
         }
 

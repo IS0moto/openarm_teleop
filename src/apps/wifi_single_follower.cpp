@@ -185,11 +185,11 @@ int main(int argc, char** argv) {
                 case safety::SafetyState::FAULT: state_str = "FAULT"; break;
             }
             
-            LOG_INFO("State: " << state_str 
-                     << " | RX: " << receiver.get_received_count() 
-                     << " | Loss: " << state_buffer.get_lost_packet_count()
-                     << " | Gap: " << std::fixed << std::setprecision(1) << gap_ms << "ms"
-                     << " | Period: " << state_buffer.get_average_receive_period_ms() << "ms");
+            LOG_DEBUG("State: " << state_str
+                      << " | RX: " << receiver.get_received_count()
+                      << " | Loss: " << state_buffer.get_lost_packet_count()
+                      << " | Gap: " << std::fixed << std::setprecision(1) << gap_ms << "ms"
+                      << " | Period: " << state_buffer.get_average_receive_period_ms() << "ms");
             print_time = now;
         }
 

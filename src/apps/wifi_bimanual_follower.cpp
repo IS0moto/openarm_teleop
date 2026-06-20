@@ -450,8 +450,8 @@ int main(int argc, char** argv) {
 
         auto now = std::chrono::steady_clock::now();
         if (now - print_time > std::chrono::seconds(1)) {
-            LOG_INFO("Status [R: " << safety_state_to_str(state_r_st) << ", Loss: " << state_buffer_r.get_lost_packet_count()
-                     << " | L: " << safety_state_to_str(state_l_st) << ", Loss: " << state_buffer_l.get_lost_packet_count() << "]");
+            LOG_DEBUG("Status [R: " << safety_state_to_str(state_r_st) << ", Loss: " << state_buffer_r.get_lost_packet_count()
+                      << " | L: " << safety_state_to_str(state_l_st) << ", Loss: " << state_buffer_l.get_lost_packet_count() << "]");
             print_time = now;
         }
 
