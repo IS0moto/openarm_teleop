@@ -13,6 +13,7 @@ The repository currently supports three practical workflows:
 - [Repository structure](docs/repository_structure.md)
 - [Setup and installation](docs/setup_installation.md)
 - [Two-PC Leader/Follower teleop](docs/leader_follower_two_pc.md)
+- [Two-PC ports with camera, recording, GUI, and AI](docs/two_pc_ports_camera_ai.md)
 - [Simulator and mock-mode Leader/Follower](docs/leader_follower_simulator.md)
 - [VR controller teleop](docs/vr_controller_teleop.md)
 - [CLI and configuration reference](docs/cli_reference.md)
