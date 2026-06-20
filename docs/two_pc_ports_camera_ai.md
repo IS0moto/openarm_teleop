@@ -84,6 +84,10 @@ CONTROL_DEST_IP=127.0.0.1 \
 
 ## Baseline Physical Leader/Follower
 
+This direct layout is for low-level bring-up and troubleshooting only. Normal
+GUI/session operation should use the Control Arbiter layout above so command
+ownership is selected by `set_mode`.
+
 Start the Follower PC first:
 
 ```bash
