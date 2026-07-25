@@ -72,6 +72,10 @@ public:
 
     std::vector<double> Dn_, Kp_, Kd_, Fc_, k_, Fv_, Fo_;
 
+    // Per-joint gravity-comp trim (leader). grav_cmd[i] = gravity[i]*gscale_[i] + goffset_[i].
+    // Empty => identity (scale 1.0, offset 0.0).
+    std::vector<double> gscale_, goffset_;
+
     // bool Setup(void);
     void Setstate(int state);
     void Shutdown(void);
@@ -79,6 +83,8 @@ public:
     void SetParameter(const std::vector<double> &Kp, const std::vector<double> &Kd,
                       const std::vector<double> &Fc, const std::vector<double> &k,
                       const std::vector<double> &Fv, const std::vector<double> &Fo);
+
+    void SetGravityTrim(const std::vector<double> &scale, const std::vector<double> &offset);
 
     bool AdjustPosition(void);
 

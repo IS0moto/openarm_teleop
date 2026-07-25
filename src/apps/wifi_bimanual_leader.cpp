@@ -176,6 +176,13 @@ int main(int argc, char** argv) {
         auto leader_k = leader_loader.get_vector("LeaderArmParam", "k");
         auto leader_Fv = leader_loader.get_vector("LeaderArmParam", "Fv");
         auto leader_Fo = leader_loader.get_vector("LeaderArmParam", "Fo");
+        // Optional per-joint gravity trim (defaults: no change). Applied to both arms.
+        auto leader_gscale = leader_loader.has("LeaderArmParam", "GravityScale")
+                                 ? leader_loader.get_vector("LeaderArmParam", "GravityScale")
+                                 : std::vector<double>(leader_kp.size(), 1.0);
+        auto leader_goffset = leader_loader.has("LeaderArmParam", "GravityOffset")
+                                  ? leader_loader.get_vector("LeaderArmParam", "GravityOffset")
+                                  : std::vector<double>(leader_kp.size(), 0.0);
 
         dynamics_r = new Dynamics(right_urdf, "openarm_body_link0", "openarm_right_hand");
         if (!dynamics_r->Init()) {
@@ -197,7 +204,8 @@ int main(int argc, char** argv) {
         state_r = std::make_shared<RobotSystemState>(arm_r_num, hand_r_num);
         control_r = new Control(leader_arm_r, dynamics_r, nullptr, state_r, 1.0 / rate_hz, ROLE_LEADER, "right_arm", arm_r_num, hand_r_num);
         control_r->SetParameter(leader_kp, leader_kd, leader_Fc, leader_k, leader_Fv, leader_Fo);
-        
+        control_r->SetGravityTrim(leader_gscale, leader_goffset);
+
         dynamics_l = new Dynamics(left_urdf, "openarm_body_link0", "openarm_left_hand");
         if (!dynamics_l->Init()) {
             LOG_ERROR("Failed to initialize left arm dynamics");
@@ -219,6 +227,7 @@ int main(int argc, char** argv) {
         state_l = std::make_shared<RobotSystemState>(arm_l_num, hand_l_num);
         control_l = new Control(leader_arm_l, dynamics_l, nullptr, state_l, 1.0 / rate_hz, ROLE_LEADER, "left_arm", arm_l_num, hand_l_num);
         control_l->SetParameter(leader_kp, leader_kd, leader_Fc, leader_k, leader_Fv, leader_Fo);
+        control_l->SetGravityTrim(leader_gscale, leader_goffset);
 
         LOG_INFO("Adjusting position...");
         std::thread thread_r(&Control::AdjustPosition, control_r);

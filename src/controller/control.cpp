@@ -90,6 +90,11 @@ void Control::SetParameter(const std::vector<double>& Kp, const std::vector<doub
     Fo_ = Fo;
 }
 
+void Control::SetGravityTrim(const std::vector<double>& scale, const std::vector<double>& offset) {
+    gscale_ = scale;
+    goffset_ = offset;
+}
+
 bool Control::bilateral_step() {
     // get motor status
     std::vector<MotorState> arm_motor_states;
@@ -269,12 +274,17 @@ bool Control::unilateral_step() {
         for (size_t i = 0; i < joint_gripper_velocities.size(); ++i)
             ComputeFriction(joint_gripper_velocities.data(), friction.data(), arm_dof + i);
 
-        // arm joint state
+        // arm joint state (leader gravity comp, with per-joint gravity trim)
+        //   grav_cmd[i] = gravity[i]*gscale_[i] + goffset_[i]   (empty vectors => identity)
         std::vector<JointState> joint_arm_state_torque(arm_dof);
+        std::vector<double> grav_cmd(arm_dof, 0.0);
         for (size_t i = 0; i < arm_dof; ++i) {
+            const double gs = (i < gscale_.size()) ? gscale_[i] : 1.0;
+            const double go = (i < goffset_.size()) ? goffset_[i] : 0.0;
+            grav_cmd[i] = gravity[i] * gs + go;
             joint_arm_state_torque[i].position = joint_arm_positions[i];
             joint_arm_state_torque[i].velocity = joint_arm_velocities[i];
-            joint_arm_state_torque[i].effort = gravity[i] + friction[i] * 0.3 + coriolis[i] * 0.1;
+            joint_arm_state_torque[i].effort = grav_cmd[i] + friction[i] * 0.3 + coriolis[i] * 0.1;
         }
 
         // gripper joint state
