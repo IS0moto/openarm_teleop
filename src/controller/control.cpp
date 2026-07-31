@@ -382,7 +382,8 @@ void Control::ComputeFriction(const double* velocity, double* friction, size_t i
     }
 }
 
-bool Control::AdjustPosition(void) {
+bool Control::MoveToPose(const std::vector<double>& target_arm,
+                         const std::vector<double>& target_gripper) {
     int nstep = 220;
     double alpha;
 
@@ -403,14 +404,14 @@ bool Control::AdjustPosition(void) {
 
     std::vector<JointState> joint_arm_goal(NMOTORS - 1);
     for (size_t i = 0; i < NMOTORS - 1; ++i) {
-        joint_arm_goal[i].position = INITIAL_POSITION[i];
+        joint_arm_goal[i].position = (i < target_arm.size()) ? target_arm[i] : INITIAL_POSITION[i];
         joint_arm_goal[i].velocity = 0.0;
         joint_arm_goal[i].effort = 0.0;
     }
 
     std::vector<JointState> joint_hand_goal(joint_hand_now.size());
     for (size_t i = 0; i < joint_hand_goal.size(); ++i) {
-        joint_hand_goal[i].position = 0.0;
+        joint_hand_goal[i].position = (i < target_gripper.size()) ? target_gripper[i] : 0.0;
         joint_hand_goal[i].velocity = 0.0;
         joint_hand_goal[i].effort = 0.0;
     }
@@ -504,6 +505,13 @@ bool Control::AdjustPosition(void) {
     robot_state_->hand_state().set_all_responses(joint_hand_final);
 
     return true;
+}
+
+// Move to the fixed home pose (INITIAL_POSITION, grippers open).
+bool Control::AdjustPosition(void) {
+    std::vector<double> target_arm(INITIAL_POSITION, INITIAL_POSITION + (NMOTORS - 1));
+    std::vector<double> target_gripper(1, 0.0);
+    return MoveToPose(target_arm, target_gripper);
 }
 
 bool Control::DetectVibration(const double* velocity, bool* what_axis) {

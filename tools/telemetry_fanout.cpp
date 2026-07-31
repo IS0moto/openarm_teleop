@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -150,8 +151,13 @@ int main(int argc, char** argv) {
         }
 
         ++packets;
-        if (packets % 100 == 0) {
-            std::cout << "Forwarded " << packets << " telemetry packets\n";
+        // DEBUG-level heartbeat: hidden by default, shown with OPENARM_LOG_LEVEL=DEBUG.
+        static const bool log_debug = [] {
+            const char* e = std::getenv("OPENARM_LOG_LEVEL");
+            return e && std::string(e) == "DEBUG";
+        }();
+        if (log_debug && packets % 100 == 0) {
+            std::cout << "[DEBUG] Forwarded " << packets << " telemetry packets\n";
         }
     }
 

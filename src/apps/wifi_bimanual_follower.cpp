@@ -7,6 +7,8 @@
 #include <vector>
 #include <iomanip>
 #include <memory>
+#include <mutex>
+#include <sstream>
 
 #include "openarm_wifi_teleop/net/udp_receiver.hpp"
 #include "openarm_wifi_teleop/core/teleop_state_buffer.hpp"
@@ -33,6 +35,20 @@ std::atomic<bool> init_position_requested(false);
 std::atomic<bool> init_position_in_progress(false);
 std::atomic<bool> recover_estop_requested(false);
 std::atomic<bool> recover_estop_in_progress(false);
+std::atomic<bool> goto_pose_requested(false);
+std::atomic<bool> goto_pose_in_progress(false);
+std::mutex goto_pose_mutex;
+// Target pose: 16 values [R_arm(7), R_grip(1), L_arm(7), L_grip(1)].
+std::vector<double> goto_pose_target;
+
+// Parse whitespace-separated doubles; return true iff exactly 16 were read.
+static bool parse_pose16(const std::string& args, std::vector<double>& out) {
+    out.clear();
+    std::istringstream iss(args);
+    double v;
+    while (iss >> v) out.push_back(v);
+    return out.size() == 16;
+}
 core::TeleopStateBuffer state_buffer_r;
 core::TeleopStateBuffer state_buffer_l;
 std::unique_ptr<safety::SafetyManager> safety_mgr_r;
@@ -184,6 +200,7 @@ int main(int argc, char** argv) {
                 "\"left_state\":\"" + std::string(safety_state_to_str(l_state)) + "\","
                 "\"init_requested\":" + std::string(init_position_requested ? "true" : "false") + ","
                 "\"init_in_progress\":" + std::string(init_position_in_progress ? "true" : "false") + ","
+                "\"goto_in_progress\":" + std::string(goto_pose_in_progress ? "true" : "false") + ","
                 "\"recover_requested\":" + std::string(recover_estop_requested ? "true" : "false") + ","
                 "\"recover_in_progress\":" + std::string(recover_estop_in_progress ? "true" : "false") + ","
                 "\"running\":" + std::string(keep_running ? "true" : "false")
@@ -192,6 +209,18 @@ int main(int argc, char** argv) {
         runtime_control->register_handler("init_position", [&](const std::string&) {
             init_position_requested = true;
             return control::json_ok("\"message\":\"follower init_position requested\"");
+        });
+        runtime_control->register_handler("goto_pose", [&](const std::string& args) {
+            std::vector<double> vals;
+            if (!parse_pose16(args, vals)) {
+                return control::json_error("goto_pose expects 16 whitespace-separated values");
+            }
+            {
+                std::lock_guard<std::mutex> lock(goto_pose_mutex);
+                goto_pose_target = vals;
+            }
+            goto_pose_requested = true;
+            return control::json_ok("\"message\":\"follower goto_pose requested\"");
         });
         runtime_control->register_handler("reset_safety", [&](const std::string&) {
             if (safety_mgr_r) safety_mgr_r->reset();
@@ -362,6 +391,33 @@ int main(int argc, char** argv) {
                 if (safety_mgr_l) safety_mgr_l->reset();
                 init_position_in_progress = false;
                 LOG_INFO("Runtime follower init_position complete (mock/no-op).");
+            }
+        }
+
+        if (goto_pose_requested.exchange(false)) {
+            goto_pose_in_progress = true;
+            std::vector<double> t;
+            {
+                std::lock_guard<std::mutex> lock(goto_pose_mutex);
+                t = goto_pose_target;
+            }
+            LOG_INFO("Runtime goto_pose requested for follower arms.");
+            if (!mock && control_r && control_l && t.size() == 16) {
+                std::vector<double> tr(t.begin(), t.begin() + 7), gr{t[7]};
+                std::vector<double> tl(t.begin() + 8, t.begin() + 15), gl{t[15]};
+                std::thread([control_r, control_l, tr, gr, tl, gl]() {
+                    std::thread thread_r([&] { control_r->MoveToPose(tr, gr); });
+                    std::thread thread_l([&] { control_l->MoveToPose(tl, gl); });
+                    thread_r.join();
+                    thread_l.join();
+                    if (safety_mgr_r) safety_mgr_r->reset();
+                    if (safety_mgr_l) safety_mgr_l->reset();
+                    goto_pose_in_progress = false;
+                    LOG_INFO("Runtime follower goto_pose complete.");
+                }).detach();
+            } else {
+                goto_pose_in_progress = false;
+                LOG_INFO("Runtime follower goto_pose complete (mock/no-op).");
             }
         }
 

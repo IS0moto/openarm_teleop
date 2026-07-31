@@ -88,6 +88,10 @@ public:
 
     bool AdjustPosition(void);
 
+    // Interpolate to an arbitrary target pose (arm joints + grippers).
+    bool MoveToPose(const std::vector<double> &target_arm,
+                    const std::vector<double> &target_gripper);
+
     // Compute torque based on bilateral
     bool bilateral_step();
     bool unilateral_step();
