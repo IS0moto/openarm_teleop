@@ -23,10 +23,8 @@ bring-up unless there is a clear conflict.
 | `51000` | UDP | local or routed | `wifi_bimanual_follower --publish-telemetry` or fanout | recorder, AI, VR leader, tools | OpenArm follower telemetry |
 | `51010` | UDP | Follower local fanout input | `wifi_bimanual_follower` | `telemetry_fanout` | Optional telemetry fanout input on Follower PC |
 | `51011` | UDP | Follower -> Leader | Follower-side `telemetry_fanout` | Leader-side `telemetry_fanout` | Optional telemetry trunk to Leader PC |
-| `52000` | UDP | Follower -> Leader | `lerobot_teleop_recorder` preview streamer | GUI, AI, viewer, or video fanout | H.264/RTP camera preview |
-| `52001` | UDP | Leader local fanout output | `udp_fanout` | GUI | Optional GUI camera input |
-| `52002` | UDP | Leader local fanout output | `udp_fanout` | AI controller | Optional AI camera input |
-| `52100` | TCP/HTTP | Leader -> Follower | `lerobot_teleop_recorder` HTTP preview | browser | Optional browser preview |
+| `52000` | UDP | Follower -> Leader | `lerobot_teleop_recorder` preview streamer | GUI or viewer | H.264/RTP preview, one stream, camera selectable at runtime |
+| `52200`+i | UDP | Follower -> Leader | `lerobot_teleop_recorder` AI streamer | AI controller | One stream per camera index (front=52200, top=52201) |
 | `53100` | TCP | Leader GUI -> Follower | `lerobot_teleop_recorder` control server | GUI or CLI client | Start/stop recording, status, shutdown |
 | `53200` | TCP | Leader GUI/AI -> Follower | `wifi_bimanual_follower` runtime control server | GUI or AI | Follower status, init, recover, runtime commands |
 | `53201` | TCP | GUI -> Leader | `wifi_bimanual_leader` runtime control server | GUI | Leader status, enable/disable, init |
@@ -146,47 +144,33 @@ Then start the resident recorder/camera session on the Follower PC:
 
 ```bash
 cd ~/openarm_isolate_teleop/lerobot_teleop_recorder
-LEADER_PC_IP=<LEADER_PC_IP> \
-TELEMETRY_PORT=51000 \
-PREVIEW_PORT=52000 \
-PREVIEW_HTTP_PORT=52100 \
-CONTROL_PORT=53100 \
-CAMERA_TYPE=realsense \
-./scripts/session/start_openarm_session.sh
+./scripts/session/start_openarm_session.sh      # reads config/session.yaml
 ```
 
-The recorder consumes telemetry locally on `127.0.0.1:51000`, records camera
-frames locally, and streams low-latency H.264/RTP preview to
-`<LEADER_PC_IP>:52000`.
+Cameras, preview, AI streams, and ports are all described by
+`config/session.yaml`; the session takes no other arguments. The recorder
+consumes telemetry locally on `127.0.0.1:51000`, records every camera locally,
+and streams low-latency H.264/RTP preview to `<LEADER_PC_IP>:52000`.
 
 ## GUI on the Leader PC
 
 The GUI sends TCP runtime commands to both C++ processes and recording commands
 to the recorder:
 
-```json
-{
-  "leader": {
-    "host": "127.0.0.1",
-    "control_port": 53201
-  },
-  "follower": {
-    "host": "<FOLLOWER_PC_IP>",
-    "control_port": 53200
-  },
-  "recorder": {
-    "host": "<FOLLOWER_PC_IP>",
-    "control_port": 53100
-  },
-  "preview": {
-    "host": "<FOLLOWER_PC_IP>",
-    "port": 52000
-  }
-}
+```yaml
+leader:   { host: 127.0.0.1, control_port: 53201 }
+follower: { host: <FOLLOWER_PC_IP>, control_port: 53200 }
+recorder: { host: <FOLLOWER_PC_IP>, control_port: 53100 }
+preview:
+  host: <FOLLOWER_PC_IP>
+  port: 52000
+  width: 640
+  height: 480
 ```
 
-The GUI video receiver binds a local UDP port. The `preview.host` value is kept
-for operator context; the important receiver setting is `preview.port`.
+The GUI video receiver binds a local UDP port. `preview.host` is operator
+context; `preview.port` is the receiver setting, and `width`/`height` must match
+the recorder's `preview` block because the receiver reads fixed-size raw frames.
 
 ## AI Controller Trial
 
@@ -194,16 +178,11 @@ The AI controller can replace the physical leader as the command source:
 
 ```bash
 cd ~/openarm_isolate_teleop/openarm_ai_teleop
-uv run ai_controller.py \
-  --model-path <path-or-hf-repo> \
-  --follower-ip <FOLLOWER_PC_IP> \
-  --control-port-r 50000 \
-  --control-port-l 50001 \
-  --telemetry-port 51000 \
-  --tcp-port 53200 \
-  --gst-port 52000 \
-  --init-arms
+uv run ai_controller.py --config config/ai.yaml
 ```
+
+The controller reads the loaded policy's image keys and asks the recorder to
+stream exactly those cameras on `52200 + index`.
 
 Do not run an enabled physical leader and AI controller against the same
 Follower at the same time. If you keep `wifi_bimanual_leader` open for GUI
@@ -258,34 +237,24 @@ cd ~/openarm_isolate_teleop/openarm_wifi_bimanual_teleop
 Configure each telemetry consumer to a unique local port. For example, AI uses
 `--telemetry-port 51000`, while a debug tool can use `51002`.
 
-## Camera Fanout
+## Camera Streams
 
-Use camera fanout when both GUI rendering and AI inference need the same
-Follower camera stream on the Leader PC.
-
-```text
-lerobot_teleop_recorder preview streamer
-  -> <LEADER_PC_IP>:52000
-  -> Leader udp_fanout
-     -> 127.0.0.1:52001  GUI
-     -> 127.0.0.1:52002  AI
-```
-
-Leader PC:
-
-```bash
-cd ~/openarm_isolate_teleop/openarm_wifi_bimanual_teleop
-./script/start_leader_camera_fanout.sh
-```
-
-Then set:
+The preview and the AI streams are separate, and each has exactly one reader, so
+no fanout process is involved.
 
 ```text
-GUI config.json preview.port = 52001
-AI controller --gst-port 52002
+lerobot_teleop_recorder
+  preview streamer  -> <LEADER_PC_IP>:52000           GUI (one stream)
+  ai streamers      -> <LEADER_PC_IP>:52200 + index   AI controller (per camera)
 ```
 
-If only one process needs live video, skip the fanout and use `52000` directly.
+The preview always exists while the session runs; which camera it shows is
+changed with `select_preview` from the GUI or the CLI. The AI streams are
+started only when the AI controller asks for them and stopped when it exits or
+control mode leaves AI.
+
+A UDP port can only be read by one process, so do not point the GUI and a
+standalone viewer at `52000` at the same time.
 
 ## Quick Checks
 
@@ -293,13 +262,13 @@ On the Follower PC:
 
 ```bash
 ss -ulnp | grep -E '50000|50001|51000|51010'
-ss -tlnp | grep -E '53100|53200|52100'
+ss -tlnp | grep -E '53100|53200'
 ```
 
 On the Leader PC:
 
 ```bash
-ss -ulnp | grep -E '51000|51011|52000|52001|52002|54002'
+ss -ulnp | grep -E '51000|51011|52000|52200|52201|54002'
 ss -tlnp | grep -E '53201'
 ```
 
