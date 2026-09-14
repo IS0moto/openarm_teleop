@@ -9,8 +9,14 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <iomanip>
 
 #include "openarm_wifi_teleop/net/udp_sender.hpp"
+#include "openarm_wifi_teleop/net/udp_receiver.hpp"
+#include "openarm_wifi_teleop/net/feedback_packet.hpp"
+#include "openarm_wifi_teleop/core/feedback_state_buffer.hpp"
+#include "openarm_wifi_teleop/safety/bilateral_gate.hpp"
+#include "openarm_wifi_teleop/utils/link_check.hpp"
 #include "openarm_wifi_teleop/net/packet_codec.hpp"
 #include "openarm_wifi_teleop/control/runtime_control_server.hpp"
 #include "openarm_wifi_teleop/utils/logging.hpp"
@@ -37,6 +43,78 @@ std::atomic<bool> goto_pose_in_progress(false);
 std::mutex goto_pose_mutex;
 // Target pose: 16 values [R_arm(7), R_grip(1), L_arm(7), L_grip(1)].
 std::vector<double> goto_pose_target;
+
+// Bilateral: set by `bilateral_enable` once the link gate passes, cleared by
+// `bilateral_disable`, `disable`, estop, or a gate failure while running.
+// Phase 1 only requests feedback and monitors the link; no torque from the
+// follower is applied to the leader arms yet (that is Phase 2).
+std::atomic<bool> bilateral_requested(false);
+
+// Bilateral settings (config/leader.yaml: BilateralFeedback / BilateralLink).
+struct BilateralSettings {
+    bool feedback_enabled = false;
+    std::string bind_ip = "0.0.0.0";
+    uint16_t right_port = 50500;
+    uint16_t left_port = 50501;
+    std::string peer_ip = "";          // follower PC; the physical link is checked toward it
+    double eval_window_s = 1.0;
+    double link_recheck_s = 1.0;
+    openarm_wifi_teleop::safety::BilateralGateConfig gate;
+};
+
+static BilateralSettings load_bilateral_settings(const std::string& path) {
+    BilateralSettings b;
+    try {
+        YamlLoader cfg(path);
+        if (!cfg.has_node("BilateralFeedback")) return b;
+        b.feedback_enabled = cfg.get_bool_or("BilateralFeedback", "Enabled", false);
+        b.bind_ip = cfg.get_string_or("BilateralFeedback", "BindIp", b.bind_ip);
+        b.right_port = static_cast<uint16_t>(cfg.get_int_or("BilateralFeedback", "RightPort", b.right_port));
+        b.left_port = static_cast<uint16_t>(cfg.get_int_or("BilateralFeedback", "LeftPort", b.left_port));
+        b.eval_window_s = cfg.get_double_or("BilateralLink", "EvalWindowS", b.eval_window_s);
+        b.link_recheck_s = cfg.get_double_or("BilateralLink", "RecheckIntervalS", b.link_recheck_s);
+        b.peer_ip = cfg.get_string_or("BilateralLink", "PeerIp", b.peer_ip);
+        b.gate.require_wired = cfg.get_bool_or("BilateralLink", "RequireWired", b.gate.require_wired);
+        b.gate.allow_loopback = cfg.get_bool_or("BilateralLink", "AllowLoopback", b.gate.allow_loopback);
+        b.gate.min_link_speed_mbps = cfg.get_int_or("BilateralLink", "MinLinkSpeedMbps", b.gate.min_link_speed_mbps);
+        b.gate.min_feedback_rate_hz = cfg.get_double_or("BilateralLink", "MinFeedbackRateHz", b.gate.min_feedback_rate_hz);
+        b.gate.max_feedback_age_ms = cfg.get_double_or("BilateralLink", "MaxFeedbackAgeMs", b.gate.max_feedback_age_ms);
+        b.gate.max_rtt_p95_ms = cfg.get_double_or("BilateralLink", "MaxRttP95Ms", b.gate.max_rtt_p95_ms);
+        b.gate.max_loss_percent = cfg.get_double_or("BilateralLink", "MaxLossPercent", b.gate.max_loss_percent);
+        b.gate.require_follower_link_ok = cfg.get_bool_or("BilateralLink", "RequireFollowerLinkOk", b.gate.require_follower_link_ok);
+    } catch (const std::exception& e) {
+        LOG_WARN("Bilateral feedback disabled: " << e.what());
+        b.feedback_enabled = false;
+    }
+    return b;
+}
+
+static std::string fmt2(double v) {
+    std::ostringstream os;
+    os << std::fixed << std::setprecision(2) << v;
+    return os.str();
+}
+
+static std::string feedback_stats_json(const core::FeedbackStateBuffer::Stats& s,
+                                       const net::FeedbackPacket* latest) {
+    std::string j = "{";
+    j += "\"has_data\":" + std::string(s.has_data ? "true" : "false") + ",";
+    j += "\"age_ms\":" + fmt2(s.age_ms) + ",";
+    j += "\"rate_hz\":" + fmt2(s.rate_hz) + ",";
+    j += "\"loss_percent\":" + fmt2(s.loss_percent) + ",";
+    j += "\"rtt_p50_ms\":" + fmt2(s.rtt_p50_ms) + ",";
+    j += "\"rtt_p95_ms\":" + fmt2(s.rtt_p95_ms) + ",";
+    j += "\"rtt_max_ms\":" + fmt2(s.rtt_max_ms) + ",";
+    j += "\"cmd_hold_p95_ms\":" + fmt2(s.cmd_hold_p95_ms) + ",";
+    j += "\"received_total\":" + std::to_string(s.received_total) + ",";
+    j += "\"lost_total\":" + std::to_string(s.lost_total) + ",";
+    j += "\"follower_link_ok\":" + std::string((latest && latest->link_ok) ? "true" : "false") + ",";
+    j += "\"follower_enabled\":" + std::string((latest && latest->enabled) ? "true" : "false") + ",";
+    j += "\"follower_safety_state\":" + std::to_string(latest ? latest->safety_state : 0) + ",";
+    j += "\"follower_mode\":" + std::to_string(latest ? latest->mode : 0);
+    j += "}";
+    return j;
+}
 
 // Parse whitespace-separated doubles; return true iff exactly 16 were read.
 static bool parse_pose16(const std::string& args, std::vector<double>& out) {
@@ -272,9 +350,132 @@ int main(int argc, char** argv) {
                  << " at " << telemetry_rate_hz << " Hz");
     }
 
+    // --- Bilateral feedback receive + link gate ---
+    BilateralSettings bi = load_bilateral_settings("config/leader.yaml");
+    safety::BilateralGate gate(bi.gate);
+    core::FeedbackStateBuffer fb_buffer_r(bi.eval_window_s);
+    core::FeedbackStateBuffer fb_buffer_l(bi.eval_window_s);
+    std::unique_ptr<net::UdpReceiver> fb_receiver_r, fb_receiver_l;
+    utils::LinkInfo leader_link;
+    safety::BilateralGateResult link_result;
+    auto next_link_check = std::chrono::steady_clock::now();
+    auto next_gate_check = std::chrono::steady_clock::now();
+    std::mutex gate_mutex;  // guards leader_link / link_result (read from the control thread)
+
+    auto refresh_link = [&]() {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        if (bi.peer_ip.empty()) {
+            leader_link = utils::LinkInfo{};
+            leader_link.error = "BilateralLink.PeerIp is not set";
+        } else {
+            leader_link = utils::query_link_to(bi.peer_ip);
+        }
+        link_result = gate.check_link(leader_link);
+    };
+
+    // Full gate: local link + both arms' feedback quality. Returns reasons on failure.
+    auto evaluate_gate = [&]() {
+        safety::BilateralGateResult total;
+        if (!bi.feedback_enabled) {
+            total.reasons.push_back("BilateralFeedback.Enabled is false in config/leader.yaml");
+            return total;
+        }
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            total.reasons = link_result.reasons;
+        }
+        net::FeedbackPacket lr, ll;
+        bool hr = fb_buffer_r.get_latest(lr);
+        bool hl = fb_buffer_l.get_latest(ll);
+        auto rr = gate.check_feedback("right", fb_buffer_r.snapshot(), hr ? &lr : nullptr);
+        auto rl = gate.check_feedback("left", fb_buffer_l.snapshot(), hl ? &ll : nullptr);
+        total.reasons.insert(total.reasons.end(), rr.reasons.begin(), rr.reasons.end());
+        total.reasons.insert(total.reasons.end(), rl.reasons.begin(), rl.reasons.end());
+        total.ok = total.reasons.empty();
+        return total;
+    };
+
+    auto make_feedback_callback = [&](core::FeedbackStateBuffer& buf) {
+        return [&buf](const void* data, size_t size) {
+            if (size != sizeof(net::FeedbackPacket)) return;
+            net::FeedbackPacket fb;
+            std::memcpy(&fb, data, sizeof(fb));
+            if (!net::PacketCodec::decode_and_validate(fb)) return;
+            uint64_t rtt_ns = 0;
+            if (fb.echo_cmd_send_time_ns != 0) {
+                uint64_t now = utils::system_now_ns();
+                if (now > fb.echo_cmd_send_time_ns) rtt_ns = now - fb.echo_cmd_send_time_ns;
+            }
+            buf.update(fb, rtt_ns);
+        };
+    };
+
+    if (bi.feedback_enabled) {
+        refresh_link();
+        LOG_INFO("Bilateral feedback listening on " << bi.bind_ip << ":" << bi.right_port << "/" << bi.left_port
+                 << " peer=" << bi.peer_ip << " link=" << leader_link.describe()
+                 << " link_ok=" << (link_result.ok ? "true" : "false"));
+        if (!link_result.ok) {
+            LOG_WARN("Leader link check failed: " << link_result.reasons_joined());
+        }
+        fb_receiver_r = std::make_unique<net::UdpReceiver>(bi.bind_ip, bi.right_port);
+        fb_receiver_l = std::make_unique<net::UdpReceiver>(bi.bind_ip, bi.left_port);
+        if (!fb_receiver_r->start_raw(make_feedback_callback(fb_buffer_r)) ||
+            !fb_receiver_l->start_raw(make_feedback_callback(fb_buffer_l))) {
+            LOG_ERROR("Failed to start bilateral feedback receivers");
+            return 1;
+        }
+    }
+
+    auto bilateral_status_json = [&]() {
+        net::FeedbackPacket lr, ll;
+        bool hr = fb_buffer_r.get_latest(lr);
+        bool hl = fb_buffer_l.get_latest(ll);
+        auto g = evaluate_gate();
+        std::string link_desc, link_reasons;
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            link_desc = leader_link.describe();
+            link_reasons = link_result.reasons_joined();
+        }
+        std::string j = "\"bilateral\":{";
+        j += "\"feedback_enabled\":" + std::string(bi.feedback_enabled ? "true" : "false") + ",";
+        j += "\"requested\":" + std::string(bilateral_requested ? "true" : "false") + ",";
+        j += "\"engaged\":false,";  // Phase 2: true when feedback torque is applied to the leader
+        j += "\"gate_ok\":" + std::string(g.ok ? "true" : "false") + ",";
+        j += "\"gate_reasons\":\"" + control::json_escape(g.reasons_joined()) + "\",";
+        j += "\"peer_ip\":\"" + control::json_escape(bi.peer_ip) + "\",";
+        j += "\"link\":\"" + control::json_escape(link_desc) + "\",";
+        j += "\"link_reasons\":\"" + control::json_escape(link_reasons) + "\",";
+        j += "\"right\":" + feedback_stats_json(fb_buffer_r.snapshot(), hr ? &lr : nullptr) + ",";
+        j += "\"left\":" + feedback_stats_json(fb_buffer_l.snapshot(), hl ? &ll : nullptr);
+        j += "}";
+        return j;
+    };
+
     std::unique_ptr<control::RuntimeControlServer> runtime_control;
     if (control_port > 0) {
         runtime_control = std::make_unique<control::RuntimeControlServer>(control_bind_ip, control_port);
+        runtime_control->register_handler("bilateral_enable", [&](const std::string&) {
+            if (!command_enabled) {
+                return control::json_error("leader is not enabled; switch mode to leader first");
+            }
+            refresh_link();
+            auto g = evaluate_gate();
+            if (!g.ok) {
+                return control::json_error("bilateral refused: " + g.reasons_joined());
+            }
+            bilateral_requested = true;
+            LOG_INFO("Bilateral requested (gate ok).");
+            return control::json_ok("\"message\":\"bilateral requested\"," + bilateral_status_json());
+        });
+        runtime_control->register_handler("bilateral_disable", [&](const std::string&) {
+            bilateral_requested = false;
+            return control::json_ok("\"message\":\"bilateral disabled\"");
+        });
+        runtime_control->register_handler("bilateral_status", [&](const std::string&) {
+            return control::json_ok(bilateral_status_json());
+        });
         runtime_control->register_handler("status", [&](const std::string&) {
             return control::json_ok(
                 "\"role\":\"leader\","
@@ -285,11 +486,13 @@ int main(int argc, char** argv) {
                 "\"init_requested\":" + std::string(init_position_requested ? "true" : "false") + ","
                 "\"init_in_progress\":" + std::string(init_position_in_progress ? "true" : "false") + ","
                 "\"goto_in_progress\":" + std::string(goto_pose_in_progress ? "true" : "false") + ","
-                "\"running\":" + std::string(keep_running ? "true" : "false")
+                "\"running\":" + std::string(keep_running ? "true" : "false") + ","
+                "\"bilateral_requested\":" + std::string(bilateral_requested ? "true" : "false")
             );
         });
         runtime_control->register_handler("disable", [&](const std::string&) {
             command_enabled = false;
+            bilateral_requested = false;
             return control::json_ok("\"message\":\"leader disabled\"");
         });
         runtime_control->register_handler("enable", [&](const std::string&) {
@@ -314,6 +517,7 @@ int main(int argc, char** argv) {
         });
         runtime_control->register_handler("estop", [&](const std::string&) {
             command_enabled = false;
+            bilateral_requested = false;
             keep_running = false;
             return control::json_ok("\"message\":\"leader estop requested\"");
         });
@@ -405,15 +609,36 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Continuous gate while bilateral is requested: link every RecheckIntervalS,
+        // feedback quality every 100 ms. Any failure drops back to unilateral.
+        if (bilateral_requested) {
+            auto tnow = std::chrono::steady_clock::now();
+            if (tnow >= next_link_check) {
+                refresh_link();
+                next_link_check = tnow + std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(bi.link_recheck_s));
+            }
+            if (tnow >= next_gate_check) {
+                auto g = evaluate_gate();
+                if (!g.ok) {
+                    bilateral_requested = false;
+                    LOG_WARN("Bilateral dropped to unilateral: " << g.reasons_joined());
+                }
+                next_gate_check = tnow + std::chrono::milliseconds(100);
+            }
+        }
+        const uint8_t cmd_mode = static_cast<uint8_t>(
+            bilateral_requested ? net::ControlMode::BILATERAL : net::ControlMode::UNILATERAL);
+
         pkt_r.seq = seq;
         pkt_r.arm_side = static_cast<uint8_t>(net::ArmSide::RIGHT);
-        pkt_r.mode = static_cast<uint8_t>(net::ControlMode::UNILATERAL);
+        pkt_r.mode = cmd_mode;
         pkt_r.enable = command_enabled ? 1 : 0;
         pkt_r.estop = 0;
 
         pkt_l.seq = seq;
         pkt_l.arm_side = static_cast<uint8_t>(net::ArmSide::LEFT);
-        pkt_l.mode = static_cast<uint8_t>(net::ControlMode::UNILATERAL);
+        pkt_l.mode = cmd_mode;
         pkt_l.enable = command_enabled ? 1 : 0;
         pkt_l.estop = 0;
         
@@ -427,6 +652,15 @@ int main(int argc, char** argv) {
         auto now = std::chrono::steady_clock::now();
         if (now - print_time > std::chrono::seconds(1)) {
             LOG_DEBUG("Sent " << seq << " bimanual packets.");
+            if (bi.feedback_enabled) {
+                auto sr = fb_buffer_r.snapshot();
+                auto sl = fb_buffer_l.snapshot();
+                LOG_DEBUG("Feedback [R: " << fmt2(sr.rate_hz) << " Hz rtt p50/p95 " << fmt2(sr.rtt_p50_ms) << "/"
+                          << fmt2(sr.rtt_p95_ms) << " ms loss " << fmt2(sr.loss_percent) << "% | L: "
+                          << fmt2(sl.rate_hz) << " Hz rtt p50/p95 " << fmt2(sl.rtt_p50_ms) << "/"
+                          << fmt2(sl.rtt_p95_ms) << " ms loss " << fmt2(sl.loss_percent) << "%] bilateral="
+                          << (bilateral_requested ? "requested" : "off"));
+            }
             print_time = now;
         }
 
@@ -471,6 +705,9 @@ int main(int argc, char** argv) {
         next_time += std::chrono::duration_cast<std::chrono::nanoseconds>(period);
         std::this_thread::sleep_until(next_time);
     }
+
+    if (fb_receiver_r) fb_receiver_r->stop();
+    if (fb_receiver_l) fb_receiver_l->stop();
 
     if (!mock) {
         if (leader_arm_r) leader_arm_r->disable_all();

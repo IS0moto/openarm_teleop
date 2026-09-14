@@ -23,7 +23,7 @@ struct TeleopPacket {
     uint64_t send_time_ns;
 
     uint8_t arm_side;        // 0 right, 1 left
-    uint8_t mode;            // 0 unilateral
+    uint8_t mode;            // 0 unilateral, 1 bilateral (leader requests feedback)
     uint8_t enable;          // 0/1
     uint8_t estop;           // 0/1
 
@@ -56,6 +56,60 @@ Validation:
 - CRC32 must match.
 - Out-of-order packets are rejected by `TeleopStateBuffer`.
 - Sequence gaps increment the loss counter.
+
+## FeedbackPacket (bilateral)
+
+Used by:
+
+```text
+wifi_bimanual_follower -> Control Arbiter (50400/50401) -> wifi_bimanual_leader (50500/50501)
+```
+
+Header: `include/openarm_wifi_teleop/net/feedback_packet.hpp`. 340 bytes. The
+first 24 bytes have the same layout as `TeleopPacket` so the Arbiter validates
+both with one header parser. The Arbiter forwards feedback only while its mode
+is `leader`.
+
+```c
+struct FeedbackPacket {
+    uint32_t magic;          // 0x4246414F ('OAFB')
+    uint16_t version;        // 1
+    uint16_t packet_size;    // 340
+
+    uint32_t seq;
+    uint64_t send_time_ns;   // follower system clock
+
+    uint8_t arm_side;        // 0 right, 1 left
+    uint8_t mode;            // ControlMode echoed from the applied command
+    uint8_t enabled;         // 1: follower safety state is ACTIVE
+    uint8_t estop;
+
+    uint8_t arm_dof;
+    uint8_t hand_dof;
+    uint8_t safety_state;    // safety::SafetyState
+    uint8_t link_ok;         // 1: follower-side wired/speed check passed
+
+    uint32_t echo_cmd_seq;           // seq of the newest applied TeleopPacket
+    uint64_t echo_cmd_send_time_ns;  // its send_time_ns (leader clock) -> RTT at the leader
+    uint64_t cmd_hold_ns;            // follower-side age of that command when sent
+
+    double arm_pos[8];
+    double arm_vel[8];
+    double arm_tau[8];       // measured joint torque [Nm]
+    double hand_pos[4];
+    double hand_vel[4];
+    double hand_tau[4];      // measured gripper motor torque [Nm]
+
+    uint32_t crc32;
+};
+```
+
+Validation is the same as `TeleopPacket` (magic, version, size, CRC32, seq).
+The leader computes `rtt = system_now_ns - echo_cmd_send_time_ns` on its own
+clock; subtract `cmd_hold_ns` for the pure network + Arbiter delay.
+
+See [bilateral_design.md](bilateral_design.md) for the gate that decides when
+this feedback may be used.
 
 ## VR Relative Teleop Packet V2
 

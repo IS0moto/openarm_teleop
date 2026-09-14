@@ -21,6 +21,7 @@ The repository currently supports three practical workflows:
 - [Troubleshooting](docs/troubleshooting.md)
 - [Safety model](docs/safety.md)
 - [UDP protocols](docs/protocol.md)
+- [Bilateral control design (Phase 1: feedback + link gate)](docs/bilateral_design.md)
 - [Telemetry protocol](docs/telemetry_protocol.md)
 
 ## Main Binaries

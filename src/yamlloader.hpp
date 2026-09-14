@@ -41,10 +41,42 @@ public:
         return get_node(node_name, key).as<std::vector<double>>();
     }
 
+    // Get a scalar string value
+    std::string get_string(const std::string& node_name, const std::string& key) const {
+        return get_node(node_name, key).as<std::string>();
+    }
+
+    // Get a scalar bool value
+    bool get_bool(const std::string& node_name, const std::string& key) const {
+        return get_node(node_name, key).as<bool>();
+    }
+
+    // Get a scalar int value
+    int get_int(const std::string& node_name, const std::string& key) const {
+        return get_node(node_name, key).as<int>();
+    }
+
+    // Scalar getters with a default when the key (or node) is absent
+    double get_double_or(const std::string& node_name, const std::string& key, double def) const {
+        return has(node_name, key) ? get_double(node_name, key) : def;
+    }
+    std::string get_string_or(const std::string& node_name, const std::string& key,
+                              const std::string& def) const {
+        return has(node_name, key) ? get_string(node_name, key) : def;
+    }
+    bool get_bool_or(const std::string& node_name, const std::string& key, bool def) const {
+        return has(node_name, key) ? get_bool(node_name, key) : def;
+    }
+    int get_int_or(const std::string& node_name, const std::string& key, int def) const {
+        return has(node_name, key) ? get_int(node_name, key) : def;
+    }
+
     // Check if key exists
     bool has(const std::string& node_name, const std::string& key) const {
         return root_[node_name] && root_[node_name][key];
     }
+
+    bool has_node(const std::string& node_name) const { return static_cast<bool>(root_[node_name]); }
 
 private:
     YAML::Node get_node(const std::string& node_name, const std::string& key) const {

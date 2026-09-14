@@ -1,5 +1,6 @@
 #pragma once
 #include "openarm_wifi_teleop/net/teleop_packet.hpp"
+#include "openarm_wifi_teleop/net/feedback_packet.hpp"
 #include <vector>
 #include <cstddef>
 
@@ -11,6 +12,8 @@ public:
     static uint32_t calculate_crc32(const uint8_t* data, size_t length);
     static void encode(TeleopPacket& packet);
     static bool decode_and_validate(TeleopPacket& packet);
+    static void encode(FeedbackPacket& packet);
+    static bool decode_and_validate(FeedbackPacket& packet);
 };
 
 }

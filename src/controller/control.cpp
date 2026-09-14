@@ -101,14 +101,14 @@ bool Control::bilateral_step() {
     const auto& arm_motors = openarm_->get_arm().get_motors();
     for (size_t i = 0; i < arm_motors.size(); ++i) {
         const auto& motor = arm_motors[i];
-        arm_motor_states.push_back({motor.get_position(), motor.get_velocity(), 0});
+        arm_motor_states.push_back({motor.get_position(), motor.get_velocity(), motor.get_torque()});
     }
 
     std::vector<MotorState> gripper_motor_states;
     const auto& gripper_motors = openarm_->get_gripper().get_motors();
     for (size_t i = 0; i < gripper_motors.size(); ++i) {
         const auto& motor = gripper_motors[i];
-        gripper_motor_states.push_back({motor.get_position(), motor.get_velocity(), 0});
+        gripper_motor_states.push_back({motor.get_position(), motor.get_velocity(), motor.get_torque()});
     }
 
     // convert joint to motor
@@ -220,14 +220,16 @@ bool Control::bilateral_step() {
 
 bool Control::unilateral_step() {
     // get motor status
+    // get motor status (effort = measured motor torque, fed back to the leader
+    // in bilateral mode)
     std::vector<MotorState> arm_motor_states;
     for (const auto& motor : openarm_->get_arm().get_motors()) {
-        arm_motor_states.push_back({motor.get_position(), motor.get_velocity(), 0.0});
+        arm_motor_states.push_back({motor.get_position(), motor.get_velocity(), motor.get_torque()});
     }
 
     std::vector<MotorState> gripper_motor_states;
     for (const auto& motor : openarm_->get_gripper().get_motors()) {
-        gripper_motor_states.push_back({motor.get_position(), motor.get_velocity(), 0.0});
+        gripper_motor_states.push_back({motor.get_position(), motor.get_velocity(), motor.get_torque()});
     }
 
     // convert joint to motor

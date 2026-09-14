@@ -32,6 +32,8 @@ bring-up unless there is a clear conflict.
 | `50100` / `50101` | UDP | Leader -> Arbiter | `wifi_bimanual_leader` | Control Arbiter | Right/left physical leader command candidates |
 | `50200` / `50201` | UDP | AI -> Arbiter | `ai_controller.py` | Control Arbiter | Right/left AI command candidates |
 | `50300` / `50301` | UDP | VR -> Arbiter | `wifi_vr_bimanual_leader` | Control Arbiter | Right/left VR command candidates |
+| `50400` / `50401` | UDP | Follower -> Arbiter | `wifi_bimanual_follower` | Control Arbiter | Right/left bilateral feedback (q, dq, tau) |
+| `50500` / `50501` | UDP | Arbiter -> Leader | Control Arbiter (mode `leader` only) | `wifi_bimanual_leader` | Right/left bilateral feedback to the leader |
 | `53300` | TCP JSON | GUI/CLI -> Session Manager | GUI or CLI | `openarm_session_manager` | Mode, recording, status operations |
 | `53301` | TCP JSON | Session Manager -> Arbiter | `openarm_session_manager` | Control Arbiter | Arbiter mode/status control |
 
