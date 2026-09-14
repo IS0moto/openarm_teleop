@@ -277,6 +277,10 @@ int main(int argc, char** argv) {
         auto leader_goffset = leader_loader.has("LeaderArmParam", "GravityOffset")
                                   ? leader_loader.get_vector("LeaderArmParam", "GravityOffset")
                                   : std::vector<double>(leader_kp.size(), 0.0);
+        // Optional per-joint |tau| cap on everything the leader sends (defaults in Control).
+        auto leader_effort_limit = leader_loader.has("LeaderArmParam", "EffortLimit")
+                                       ? leader_loader.get_vector("LeaderArmParam", "EffortLimit")
+                                       : std::vector<double>{};
 
         dynamics_r = new Dynamics(right_urdf, "openarm_body_link0", "openarm_right_hand");
         if (!dynamics_r->Init()) {
@@ -299,6 +303,7 @@ int main(int argc, char** argv) {
         control_r = new Control(leader_arm_r, dynamics_r, nullptr, state_r, 1.0 / rate_hz, ROLE_LEADER, "right_arm", arm_r_num, hand_r_num);
         control_r->SetParameter(leader_kp, leader_kd, leader_Fc, leader_k, leader_Fv, leader_Fo);
         control_r->SetGravityTrim(leader_gscale, leader_goffset);
+        control_r->SetEffortLimits(leader_effort_limit);
 
         dynamics_l = new Dynamics(left_urdf, "openarm_body_link0", "openarm_left_hand");
         if (!dynamics_l->Init()) {
@@ -322,6 +327,7 @@ int main(int argc, char** argv) {
         control_l = new Control(leader_arm_l, dynamics_l, nullptr, state_l, 1.0 / rate_hz, ROLE_LEADER, "left_arm", arm_l_num, hand_l_num);
         control_l->SetParameter(leader_kp, leader_kd, leader_Fc, leader_k, leader_Fv, leader_Fo);
         control_l->SetGravityTrim(leader_gscale, leader_goffset);
+        control_l->SetEffortLimits(leader_effort_limit);
 
         LOG_INFO("Adjusting position...");
         std::thread thread_r(&Control::AdjustPosition, control_r);

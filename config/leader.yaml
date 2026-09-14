@@ -45,6 +45,13 @@ LeaderArmParam:
   GravityOffset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07, 0.0]
 
   # ---------------------------------------------------------
+  # Per-joint |tau| cap [Nm] on every torque the LEADER sends (J1..J7 + gripper).
+  # Non-finite values become 0 first. Defaults when omitted: 20 Nm for the arm
+  # joints (effort_limit_L), 2 Nm for the gripper.
+  # ---------------------------------------------------------
+  EffortLimit: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 2.0]
+
+  # ---------------------------------------------------------
   # Bilateral (Phase 1: feedback transport + link gate only).
   # The leader receives follower state (q, dq, tau) via the Arbiter and
   # allows `bilateral_enable` only while every gate condition holds.

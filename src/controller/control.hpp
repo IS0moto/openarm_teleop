@@ -75,6 +75,8 @@ public:
     // Per-joint gravity-comp trim (leader). grav_cmd[i] = gravity[i]*gscale_[i] + goffset_[i].
     // Empty => identity (scale 1.0, offset 0.0).
     std::vector<double> gscale_, goffset_;
+    std::vector<double> effort_limit_;
+    bool leader_first_cycle_logged_ = false;
 
     // bool Setup(void);
     void Setstate(int state);
@@ -85,6 +87,11 @@ public:
                       const std::vector<double> &Fv, const std::vector<double> &Fo);
 
     void SetGravityTrim(const std::vector<double> &scale, const std::vector<double> &offset);
+
+    // Per-joint |tau| limit applied to every torque the LEADER sends (arm J1..J7 +
+    // gripper). Defaults to effort_limit_L with a smaller gripper limit; the human
+    // is in contact with this arm, so nothing may bypass it.
+    void SetEffortLimits(const std::vector<double> &limits);
 
     bool AdjustPosition(void);
 
@@ -106,6 +113,13 @@ public:
 
     // void ComputeFriction(const double *velocity, double *friction);
     void ComputeFriction(const double *velocity, double *friction, size_t index);
+    // Friction for arm + gripper joints into friction[0 .. arm+gripper). The two
+    // velocity vectors are concatenated first so every index stays in bounds.
+    void ComputeAllFriction(const std::vector<double> &arm_velocity,
+                            const std::vector<double> &gripper_velocity,
+                            std::vector<double> &friction);
+    // Non-finite -> 0, then clamp to effort_limit_[index].
+    double ClampLeaderEffort(size_t index, double tau) const;
     void ComputeGravity(const double *position, double *gravity);
     bool DetectVibration(const double *velocity, bool *what_axis);
 };

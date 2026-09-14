@@ -127,10 +127,12 @@ Phase 1 のゲートが `ok` の間だけ、leader を `unilateral_step()` か�
 2. **ゲインランプ**: 係合後 `EngageRampS` (0.5 s) かけて Kp/Kd を 0 から目標
    値へ線形に上げる。解除時は 100 ms で 0 へ落としてから `unilateral_step()` へ。
 3. **leader は software PD + トルククランプ**: `tau = Kp(q_F - q_L) - Kd*dq_L
-   + gravity + friction` を leader 側で計算し、`effort_limit_L`
-   (`openarm_constants.hpp`) でクランプして MIT の `tau` として送る
-   (Kp=Kd=0)。人が触る側なので、モータ内蔵 PD (クランプ不可) は使わない。
-   follower は従来どおりモータ内蔵 PD。
+   + gravity + friction` を leader 側で計算し、`Control::ClampLeaderEffort()`
+   (`LeaderArmParam.EffortLimit`、既定 20 Nm / グリッパ 2 Nm、非有限値は 0) を
+   通して MIT の `tau` として送る (Kp=Kd=0)。人が触る側なので、モータ内蔵 PD
+   (クランプ不可) は使わない。follower は従来どおりモータ内蔵 PD。
+   このクランプは Phase 1 の時点で leader の unilateral 経路にも入っている
+   (グリッパ摩擦の範囲外読みで 10 Nm が出た事故の再発防止)。
 4. **`dq_ref = 0`**: 遅延した相手速度を Kd の参照に使うとエネルギーを注入する
    ので、leader 側は純粋ダンピングにする。
 5. **Kp は leader.yaml で follower と別値**: 遅延 4–6 ms を前提に、まず

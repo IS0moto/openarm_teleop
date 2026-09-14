@@ -36,6 +36,7 @@ Control::Control(openarm::can::socket::OpenArm* arm, Dynamics* dynamics_l, Dynam
     differentiator_ = new Differentiator(Ts);
     openarmjointconverter_ = new OpenArmJointConverter(arm_motor_num_);
     openarmgripperjointconverter_ = new OpenArmJGripperJointConverter(hand_motor_num_);
+    SetEffortLimits({});
 }
 
 Control::Control(openarm::can::socket::OpenArm* arm, Dynamics* dynamics_l, Dynamics* dynamics_f,
@@ -52,6 +53,7 @@ Control::Control(openarm::can::socket::OpenArm* arm, Dynamics* dynamics_l, Dynam
     differentiator_ = new Differentiator(Ts);
     openarmjointconverter_ = new OpenArmJointConverter(arm_motor_num_);
     openarmgripperjointconverter_ = new OpenArmJGripperJointConverter(hand_motor_num_);
+    SetEffortLimits({});
 
     arm_type_ = arm_type;
 }
@@ -93,6 +95,32 @@ void Control::SetParameter(const std::vector<double>& Kp, const std::vector<doub
 void Control::SetGravityTrim(const std::vector<double>& scale, const std::vector<double>& offset) {
     gscale_ = scale;
     goffset_ = offset;
+}
+
+void Control::SetEffortLimits(const std::vector<double>& limits) {
+    // Defaults: effort_limit_L for the arm joints, 2 Nm for the gripper.
+    effort_limit_.assign(effort_limit_L, effort_limit_L + NMOTORS);
+    effort_limit_[NMOTORS - 1] = 2.0;
+    for (size_t i = 0; i < limits.size() && i < effort_limit_.size(); ++i) {
+        if (std::isfinite(limits[i]) && limits[i] > 0.0) effort_limit_[i] = limits[i];
+    }
+}
+
+double Control::ClampLeaderEffort(size_t index, double tau) const {
+    if (!std::isfinite(tau)) return 0.0;
+    const double lim = (index < effort_limit_.size()) ? effort_limit_[index] : 0.0;
+    return std::max(-lim, std::min(lim, tau));
+}
+
+void Control::ComputeAllFriction(const std::vector<double>& arm_velocity,
+                                 const std::vector<double>& gripper_velocity,
+                                 std::vector<double>& friction) {
+    std::vector<double> velocity(arm_velocity.size() + gripper_velocity.size(), 0.0);
+    std::copy(arm_velocity.begin(), arm_velocity.end(), velocity.begin());
+    std::copy(gripper_velocity.begin(), gripper_velocity.end(),
+              velocity.begin() + arm_velocity.size());
+    friction.assign(velocity.size(), 0.0);
+    for (size_t i = 0; i < velocity.size(); ++i) ComputeFriction(velocity.data(), friction.data(), i);
 }
 
 bool Control::bilateral_step() {
@@ -168,11 +196,7 @@ bool Control::bilateral_step() {
     }
 
     // Friction (compute joint friction)
-    for (size_t i = 0; i < joint_arm_velocities.size(); ++i)
-        ComputeFriction(joint_arm_velocities.data(), friction.data(), i);
-    for (size_t i = 0; i < joint_gripper_velocities.size(); ++i)
-        ComputeFriction(joint_gripper_velocities.data(), friction.data(),
-                        joint_arm_velocities.size() + i);
+    ComputeAllFriction(joint_arm_velocities, joint_gripper_velocities, friction);
 
     // set gravity and friciton comp joint torque value
     for (size_t i = 0; i < arm_dof; i++) {
@@ -270,11 +294,7 @@ bool Control::unilateral_step() {
         dynamics_l_->GetCoriolis(joint_arm_positions.data(), joint_arm_velocities.data(),
                                  coriolis.data());
 
-        for (size_t i = 0; i < joint_arm_velocities.size(); ++i)
-            ComputeFriction(joint_arm_velocities.data(), friction.data(), i);
-
-        for (size_t i = 0; i < joint_gripper_velocities.size(); ++i)
-            ComputeFriction(joint_gripper_velocities.data(), friction.data(), arm_dof + i);
+        ComputeAllFriction(joint_arm_velocities, joint_gripper_velocities, friction);
 
         // arm joint state (leader gravity comp, with per-joint gravity trim)
         //   grav_cmd[i] = gravity[i]*gscale_[i] + goffset_[i]   (empty vectors => identity)
@@ -286,7 +306,8 @@ bool Control::unilateral_step() {
             grav_cmd[i] = gravity[i] * gs + go;
             joint_arm_state_torque[i].position = joint_arm_positions[i];
             joint_arm_state_torque[i].velocity = joint_arm_velocities[i];
-            joint_arm_state_torque[i].effort = grav_cmd[i] + friction[i] * 0.3 + coriolis[i] * 0.1;
+            joint_arm_state_torque[i].effort = ClampLeaderEffort(
+                i, grav_cmd[i] + friction[i] * 0.3 + coriolis[i] * 0.1);
         }
 
         // gripper joint state
@@ -294,7 +315,22 @@ bool Control::unilateral_step() {
         for (size_t i = 0; i < gripper_dof; ++i) {
             joint_gripper_state_torque[i].position = joint_gripper_positions[i];
             joint_gripper_state_torque[i].velocity = joint_gripper_velocities[i];
-            joint_gripper_state_torque[i].effort = friction[arm_dof + i] * 0.3;
+            joint_gripper_state_torque[i].effort =
+                ClampLeaderEffort(arm_dof + i, friction[arm_dof + i] * 0.3);
+        }
+
+        // One-time trace of the first leader cycle: this is where a bad gripper
+        // torque showed up once (out-of-bounds friction read, since fixed).
+        if (!leader_first_cycle_logged_) {
+            leader_first_cycle_logged_ = true;
+            std::cout << "[leader " << arm_type_ << "] first cycle: gripper vel="
+                      << (gripper_dof ? joint_gripper_velocities[0] : 0.0)
+                      << " friction=" << (gripper_dof ? friction[arm_dof] : 0.0)
+                      << " tau=" << (gripper_dof ? joint_gripper_state_torque[0].effort : 0.0)
+                      << " | arm tau=";
+            for (size_t i = 0; i < arm_dof; ++i)
+                std::cout << (i ? "," : "") << joint_arm_state_torque[i].effort;
+            std::cout << std::endl;
         }
 
         std::vector<MotorState> motor_arm_states =
