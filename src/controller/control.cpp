@@ -106,6 +106,18 @@ void Control::SetEffortLimits(const std::vector<double>& limits) {
     }
 }
 
+void Control::SetBilateralGains(const std::vector<double>& Kp, const std::vector<double>& Kd,
+                                const std::vector<double>& Kf) {
+    bkp_ = Kp;
+    bkd_ = Kd;
+    bkf_ = Kf;
+}
+
+void Control::SetFollowerGravityFeedforward(bool enabled, double scale) {
+    follower_gravity_ff_ = enabled;
+    follower_gravity_ff_scale_ = scale;
+}
+
 double Control::ClampLeaderEffort(size_t index, double tau) const {
     if (!std::isfinite(tau)) return 0.0;
     const double lim = (index < effort_limit_.size()) ? effort_limit_[index] : 0.0;
@@ -289,6 +301,119 @@ bool Control::unilateral_step() {
     std::vector<double> friction(arm_dof + gripper_dof, 0.0);
 
     if (role_ == ROLE_LEADER) {
+        return leader_step(nullptr);
+    }
+
+    else if (role_ == ROLE_FOLLOWER) {
+        std::vector<JointState> joint_arm_states_ref =
+            robot_state_->arm_state().get_all_references();
+        std::vector<JointState> joint_hand_states_ref =
+            robot_state_->hand_state().get_all_references();
+
+        // Optional gravity feedforward (bilateral): the follower otherwise sags
+        // by gravity/Kp, and that steady-state error is what the leader feels.
+        std::vector<double> ff(arm_dof, 0.0);
+        if (follower_gravity_ff_ && dynamics_f_) {
+            dynamics_f_->GetGravity(joint_arm_positions.data(), gravity.data());
+            for (size_t i = 0; i < arm_dof; ++i) {
+                double g = gravity[i] * follower_gravity_ff_scale_;
+                if (!std::isfinite(g)) g = 0.0;
+                const double lim = (i < NMOTORS) ? effort_limit_F[i] : 0.0;
+                ff[i] = std::max(-lim, std::min(lim, g));
+            }
+        }
+
+        // Joint → Motor
+        std::vector<MotorState> arm_motor_refs =
+            openarmjointconverter_->joint_to_motor(joint_arm_states_ref);
+        std::vector<MotorState> hand_motor_refs =
+            openarmgripperjointconverter_->joint_to_motor(joint_hand_states_ref);
+
+        std::vector<openarm::damiao_motor::MITParam> arm_cmds;
+        arm_cmds.reserve(arm_motor_refs.size());
+        for (size_t i = 0; i < arm_motor_refs.size(); ++i) {
+            arm_cmds.emplace_back(openarm::damiao_motor::MITParam{
+                Kp_[i], Kd_[i], arm_motor_refs[i].position, arm_motor_refs[i].velocity,
+                (i < ff.size()) ? ff[i] : 0.0});
+        }
+
+        std::vector<openarm::damiao_motor::MITParam> hand_cmds;
+        hand_cmds.reserve(hand_motor_refs.size());
+        for (size_t i = 0; i < hand_motor_refs.size(); ++i) {
+            hand_cmds.emplace_back(openarm::damiao_motor::MITParam{
+                Kp_[i + arm_dof], Kd_[i + arm_dof], hand_motor_refs[i].position,
+                hand_motor_refs[i].velocity, 0.0});
+        }
+
+        openarm_->get_arm().mit_control_all(arm_cmds);
+        openarm_->get_gripper().mit_control_all(hand_cmds);
+
+        openarm_->recv_all(200);
+
+        return true;
+    }
+
+    return true;
+}
+
+bool Control::leader_step(const LeaderBilateralCommand* cmd) {
+    // get motor status (effort = measured motor torque)
+    std::vector<MotorState> arm_motor_states;
+    for (const auto& motor : openarm_->get_arm().get_motors()) {
+        arm_motor_states.push_back({motor.get_position(), motor.get_velocity(), motor.get_torque()});
+    }
+    std::vector<MotorState> gripper_motor_states;
+    for (const auto& motor : openarm_->get_gripper().get_motors()) {
+        gripper_motor_states.push_back({motor.get_position(), motor.get_velocity(), motor.get_torque()});
+    }
+
+    std::vector<JointState> joint_arm_states =
+        openarmjointconverter_->motor_to_joint(arm_motor_states);
+    std::vector<JointState> joint_gripper_states =
+        openarmgripperjointconverter_->motor_to_joint(gripper_motor_states);
+
+    robot_state_->arm_state().set_all_responses(joint_arm_states);
+    robot_state_->hand_state().set_all_responses(joint_gripper_states);
+
+    size_t arm_dof = robot_state_->arm_state().get_size();
+    size_t gripper_dof = robot_state_->hand_state().get_size();
+
+    std::vector<double> joint_arm_positions(arm_dof, 0.0);
+    std::vector<double> joint_arm_velocities(arm_dof, 0.0);
+    std::vector<double> joint_gripper_positions(gripper_dof, 0.0);
+    std::vector<double> joint_gripper_velocities(gripper_dof, 0.0);
+
+    for (size_t i = 0; i < arm_dof; ++i) {
+        joint_arm_positions[i] = joint_arm_states[i].position;
+        joint_arm_velocities[i] = joint_arm_states[i].velocity;
+    }
+    for (size_t i = 0; i < gripper_dof; ++i) {
+        joint_gripper_positions[i] = joint_gripper_states[i].position;
+        joint_gripper_velocities[i] = joint_gripper_states[i].velocity;
+    }
+
+    std::vector<double> gravity(arm_dof, 0.0);
+    std::vector<double> coriolis(arm_dof, 0.0);
+    std::vector<double> friction(arm_dof + gripper_dof, 0.0);
+
+    // Bilateral term is active only with a command, a positive ramp scale and
+    // configured gains; everything else falls through to plain gravity comp.
+    const bool bilateral = cmd && cmd->scale > 0.0 && bkp_.size() >= arm_dof + gripper_dof &&
+                           bkd_.size() >= arm_dof + gripper_dof &&
+                           cmd->arm_pos_ref.size() >= arm_dof &&
+                           cmd->hand_pos_ref.size() >= gripper_dof;
+    const double scale = bilateral ? std::max(0.0, std::min(1.0, cmd->scale)) : 0.0;
+
+    // Model gravity at the follower pose, used to strip gravity from the
+    // follower's measured torque so the force channel carries contact only.
+    std::vector<double> gravity_ref(arm_dof, 0.0);
+    const bool use_kf = bilateral && bkf_.size() >= arm_dof + gripper_dof &&
+                        cmd->arm_tau_f.size() >= arm_dof;
+    if (use_kf) {
+        dynamics_l_->GetGravity(cmd->arm_pos_ref.data(), gravity_ref.data());
+    }
+
+    {
         // calc dynamics
         dynamics_l_->GetGravity(joint_arm_positions.data(), gravity.data());
         dynamics_l_->GetCoriolis(joint_arm_positions.data(), joint_arm_velocities.data(),
@@ -306,8 +431,15 @@ bool Control::unilateral_step() {
             grav_cmd[i] = gravity[i] * gs + go;
             joint_arm_state_torque[i].position = joint_arm_positions[i];
             joint_arm_state_torque[i].velocity = joint_arm_velocities[i];
+            double tau_b = 0.0;
+            if (bilateral) {
+                tau_b = bkp_[i] * (cmd->arm_pos_ref[i] - joint_arm_positions[i]) -
+                        bkd_[i] * joint_arm_velocities[i];
+                if (use_kf) tau_b -= bkf_[i] * (cmd->arm_tau_f[i] - gravity_ref[i]);
+                tau_b *= scale;
+            }
             joint_arm_state_torque[i].effort = ClampLeaderEffort(
-                i, grav_cmd[i] + friction[i] * 0.3 + coriolis[i] * 0.1);
+                i, grav_cmd[i] + friction[i] * 0.3 + coriolis[i] * 0.1 + tau_b);
         }
 
         // gripper joint state
@@ -315,8 +447,23 @@ bool Control::unilateral_step() {
         for (size_t i = 0; i < gripper_dof; ++i) {
             joint_gripper_state_torque[i].position = joint_gripper_positions[i];
             joint_gripper_state_torque[i].velocity = joint_gripper_velocities[i];
+            double tau_b = 0.0;
+            if (bilateral) {
+                // Gripper PD in MOTOR space: the joint<->motor map has a negative
+                // gain (m -> rad) and effort passes through unconverted, so the
+                // reference is mapped to motor position and the motor's own
+                // position/velocity/torque are used. Gains are Nm/rad like the
+                // follower's gripper Kp/Kd.
+                std::vector<JointState> ref_joint(1);
+                ref_joint[0].position = cmd->hand_pos_ref[i];
+                const double motor_ref = openarmgripperjointconverter_->joint_to_motor(ref_joint)[0].position;
+                tau_b = bkp_[arm_dof + i] * (motor_ref - gripper_motor_states[i].position) -
+                        bkd_[arm_dof + i] * gripper_motor_states[i].velocity;
+                if (use_kf && i < cmd->hand_tau_f.size()) tau_b -= bkf_[arm_dof + i] * cmd->hand_tau_f[i];
+                tau_b *= scale;
+            }
             joint_gripper_state_torque[i].effort =
-                ClampLeaderEffort(arm_dof + i, friction[arm_dof + i] * 0.3);
+                ClampLeaderEffort(arm_dof + i, friction[arm_dof + i] * 0.3 + tau_b);
         }
 
         // One-time trace of the first leader cycle: this is where a bad gripper
@@ -362,45 +509,7 @@ bool Control::unilateral_step() {
         openarm_->recv_all(200);
 
         return true;
-
     }
-
-    else if (role_ == ROLE_FOLLOWER) {
-        std::vector<JointState> joint_arm_states_ref =
-            robot_state_->arm_state().get_all_references();
-        std::vector<JointState> joint_hand_states_ref =
-            robot_state_->hand_state().get_all_references();
-
-        // Joint → Motor
-        std::vector<MotorState> arm_motor_refs =
-            openarmjointconverter_->joint_to_motor(joint_arm_states_ref);
-        std::vector<MotorState> hand_motor_refs =
-            openarmgripperjointconverter_->joint_to_motor(joint_hand_states_ref);
-
-        std::vector<openarm::damiao_motor::MITParam> arm_cmds;
-        arm_cmds.reserve(arm_motor_refs.size());
-        for (size_t i = 0; i < arm_motor_refs.size(); ++i) {
-            arm_cmds.emplace_back(openarm::damiao_motor::MITParam{
-                Kp_[i], Kd_[i], arm_motor_refs[i].position, arm_motor_refs[i].velocity, 0.0});
-        }
-
-        std::vector<openarm::damiao_motor::MITParam> hand_cmds;
-        hand_cmds.reserve(hand_motor_refs.size());
-        for (size_t i = 0; i < hand_motor_refs.size(); ++i) {
-            hand_cmds.emplace_back(openarm::damiao_motor::MITParam{
-                Kp_[i + arm_dof], Kd_[i + arm_dof], hand_motor_refs[i].position,
-                hand_motor_refs[i].velocity, 0.0});
-        }
-
-        openarm_->get_arm().mit_control_all(arm_cmds);
-        openarm_->get_gripper().mit_control_all(hand_cmds);
-
-        openarm_->recv_all(200);
-
-        return true;
-    }
-
-    return true;
 }
 
 void Control::ComputeFriction(const double* velocity, double* friction, size_t index) {

@@ -5,10 +5,10 @@
 (位置・速度・**トルク**) を leader に返して力覚提示するバイラテラルへ拡張する。
 
 - Phase 1 (実装済み): 戻り経路の追加、トルクを含む feedback の伝送、
-  有線・通信品質ゲート、運用コマンド。**leader 腕には何も反力を出さない。**
-- Phase 2 (未実装): leader 側で feedback を制御に使う (係合条件・ゲインランプ・
-  トルククランプ込み)。
-- Phase 3 (未実装): GUI トグル、ゲインの追い込み、力チャネル。
+  有線・通信品質ゲート、運用コマンド。
+- Phase 2 (実装済み): leader 側で feedback を制御に使う (係合条件・ゲインランプ・
+  トルククランプ込み)、follower の重力 FF、GUI トグル。
+- 残り: 実機でのゲイン追い込み、力チャネル (Kf) の有効化判断。
 
 ## 1. 現状と再利用できるもの
 
@@ -117,10 +117,47 @@ loopback mock で実測した値: rate 500 Hz, RTT p50/p95 1.8/1.9 ms
   送るので、AI/VR に切り替えた時点でバイラテラルは必ず解除される。
 - Arbiter が mode≠leader で feedback を落とすため、二重に遮断される。
 
-## 5. Phase 2 (leader 側の力覚提示) の設計方針
+## 5. Phase 2 (leader 側の力覚提示) — 実装
 
-Phase 1 のゲートが `ok` の間だけ、leader を `unilateral_step()` から
-バイラテラル制御へ切り替える。
+Phase 1 のゲートが `ok` の間だけ、leader を重力補償のみからバイラテラル制御へ
+切り替える。実装は `Control::leader_step(const LeaderBilateralCommand*)`
+(`src/controller/control.cpp`) と、腕ごとの係合状態機械
+`control::BilateralEngager` (`include/openarm_wifi_teleop/control/bilateral_engager.hpp`)、
+leader アプリの `step_side` ラムダ (`src/apps/wifi_bimanual_leader.cpp`)。
+
+```text
+want    = Bilateral.Enabled && bilateral_requested && feedback fresh (age <= MaxFeedbackAgeMs)
+          && follower ACTIVE && !follower ESTOP
+aligned = 全関節 |q_L - q_F| <= EngageMaxErrorRad, グリッパ <= EngageMaxErrorGripper
+
+OFF --want--> WAIT_ALIGN --aligned--> RAMP_UP (RampUpS) --> ENGAGED
+any --!want--> RAMP_DOWN (RampDownS) --> OFF
+```
+
+leader トルク (関節 i):
+
+```text
+tau_i = g(q_L)_i*scale_g + off_g + 0.3*friction_i + 0.1*coriolis_i
+      + s * ( Kp_i (q_F,i - q_L,i) - Kd_i dq_L,i - Kf_i (tau_F,i - g(q_F)_i) )
+tau_i -> ClampLeaderEffort (非有限→0, |tau| <= EffortLimit_i)
+```
+
+`s` は engager の ramp scale (0..1)。MIT には Kp=Kd=0 で `tau` だけを送る
+(software PD)。グリッパは joint↔motor 変換の符号が負なので **motor 空間**で
+PD を計算する (ゲイン単位は follower と同じ Nm/rad)。設定は
+`config/leader.yaml` の `Bilateral` (`Enabled`, `Kp`, `Kd`, `Kf`,
+`EngageMaxErrorRad`, `EngageMaxErrorGripper`, `RampUpS`, `RampDownS`)。
+
+follower 側: command の `mode == BILATERAL` の間だけ、`FollowerArmParam.GravityFeedforward`
+でモデル重力を MIT `tau` に足す (`Control::SetFollowerGravityFeedforward`)。
+これがないと follower は gravity/Kp 分だけ垂れ、その定常偏差が leader に
+一定の偽の力として返る。
+
+状態は `bilateral_status` (`state_right/left`, `scale_*`, `engaged`) と、
+GUI 用の `status` 内 `bilateral` 要約 (`requested`, `engaged`, `gate_ok`,
+`rtt_p95_ms`, `rate_hz`, `loss_percent`) に出る。
+
+設計時の方針 (実装に反映済み):
 
 1. **係合条件**: 全関節で `|q_L - q_F| < EngageMaxErrorRad` (初期値 0.1 rad) を
    満たすまで係合しない。AI モード後などの姿勢ずれで leader が跳ねるのを防ぐ。
@@ -154,7 +191,13 @@ Phase 1 のゲートが `ok` の間だけ、leader を `unilateral_step()` か�
 - `openarm_session_manager/config/arbiter.yaml`: `feedback.inputs` (50400/50401),
   `feedback.target` (leader 127.0.0.1:50500/50501)
 
-### 6.2 コマンド
+### 6.2 コマンド / GUI
+
+GUI (Operations パネル) の `Bilateral: OFF/ON` ボタンが Session Manager 経由で
+`bilateral_enable` / `bilateral_disable` を送る。Leader モードで leader が
+enabled のときだけ押せる。隣のラベルに `ready (rtt … , 500 Hz, loss …)` /
+`wait_align/ramp_up` / `ENGAGED` / `gate blocked - <理由>` が出る。拒否された
+場合は理由がダイアログで出る。
 
 leader runtime control (53201):
 
@@ -167,7 +210,23 @@ leader runtime control (53201):
 Session Manager 経由: `bilateral-enable` / `bilateral-disable` / `bilateral-status`
 (`openarm_session_manager.cli`)。
 
-### 6.3 実機での Phase 1 確認手順
+### 6.3 実機での Phase 2 確認手順
+
+1. Leader モードで `bilateral-status` の RTT/loss が正常 (Phase 1 手順 1–3)。
+2. 両腕が follower と揃った状態 (leader 追従中なら自動で揃う) で GUI の
+   `Bilateral` を ON → ラベルが `wait_align` → `ramp_up` → `ENGAGED` と変わる
+   (leader ログにも `[RIGHT] bilateral off -> wait_align -> ramp_up -> engaged`)。
+   0.5 s のランプ中に腕が跳ねないこと。
+3. follower の腕を手で押さえる → leader に抗力が返る。離すと消える。
+4. 速く動かす → follower の RateLimiter (1.5 rad/s) 分の遅れが抗力として
+   感じられる。強すぎれば `Bilateral.Kp` を下げる、または follower の
+   `max_joint_velocity_rad_s` を上げる。
+5. Bilateral ON のまま mode を AI に切替 → leader に `disable` が届き 0.1 s で
+   ramp_down → off。腕は重力補償のみに戻る。
+6. 振動が出る関節があれば、その関節の `Kp` を下げる / `Kd` を上げる。
+   `EffortLimit` は最後の砦なので、まずゲインで直す。
+
+### 6.4 実機での Phase 1 確認手順
 
 1. 通常どおり follower → Arbiter+Session Manager → leader を起動。
 2. `bilateral-status` で `link` が `eth0 ... wired carrier=1 speed=1000Mbps`、
@@ -178,7 +237,8 @@ Session Manager 経由: `bilateral-enable` / `bilateral-disable` / `bilateral-st
 5. LAN ケーブルを抜く / mode を `ai` にする → leader ログに
    `Bilateral dropped to unilateral` が出て `requested=false` になる。
 
-Phase 1 では leader 腕の挙動は従来と同一 (重力補償のみ)。
+`Bilateral.Enabled: false` にすると Phase 1 と同じ (feedback とゲートのみ、
+leader 腕は重力補償のまま) に戻る。
 
 ## 7. 変更ファイル一覧 (Phase 1)
 

@@ -384,6 +384,9 @@ int main(int argc, char** argv) {
             + "\"sent\":" + std::to_string(fb_seq) + "}";
     };
 
+    bool follower_gravity_ff = false;
+    double follower_gravity_ff_scale = 1.0;
+
     openarm::can::socket::OpenArm* follower_arm_r = nullptr;
     openarm::can::socket::OpenArm* follower_arm_l = nullptr;
     Dynamics* dynamics_r = nullptr;
@@ -406,6 +409,11 @@ int main(int argc, char** argv) {
         auto follower_k = follower_loader.get_vector("FollowerArmParam", "k");
         auto follower_Fv = follower_loader.get_vector("FollowerArmParam", "Fv");
         auto follower_Fo = follower_loader.get_vector("FollowerArmParam", "Fo");
+        // Bilateral: model-gravity feedforward while the incoming command is BILATERAL.
+        follower_gravity_ff = follower_loader.get_bool_or("FollowerArmParam", "GravityFeedforward", false);
+        follower_gravity_ff_scale = follower_loader.get_double_or("FollowerArmParam", "GravityFeedforwardScale", 1.0);
+        LOG_INFO("Follower gravity feedforward in bilateral: " << (follower_gravity_ff ? "on" : "off")
+                 << " scale=" << follower_gravity_ff_scale);
 
         // Right
         dynamics_r = new Dynamics(right_urdf, "openarm_body_link0", "openarm_right_hand");
@@ -580,6 +588,9 @@ int main(int argc, char** argv) {
                     }
                     state_r->arm_state().set_all_references(arm_refs);
                     state_r->hand_state().set_all_references(hand_refs);
+                    control_r->SetFollowerGravityFeedforward(
+                        follower_gravity_ff && target_r.mode == static_cast<uint8_t>(net::ControlMode::BILATERAL),
+                        follower_gravity_ff_scale);
                 }
                 control_r->unilateral_step();
             } else if (state_r_st == safety::SafetyState::HOLD) {
@@ -610,6 +621,9 @@ int main(int argc, char** argv) {
                     }
                     state_l->arm_state().set_all_references(arm_refs);
                     state_l->hand_state().set_all_references(hand_refs);
+                    control_l->SetFollowerGravityFeedforward(
+                        follower_gravity_ff && target_l.mode == static_cast<uint8_t>(net::ControlMode::BILATERAL),
+                        follower_gravity_ff_scale);
                 }
                 control_l->unilateral_step();
             } else if (state_l_st == safety::SafetyState::HOLD) {

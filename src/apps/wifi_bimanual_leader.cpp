@@ -10,12 +10,14 @@
 #include <mutex>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 
 #include "openarm_wifi_teleop/net/udp_sender.hpp"
 #include "openarm_wifi_teleop/net/udp_receiver.hpp"
 #include "openarm_wifi_teleop/net/feedback_packet.hpp"
 #include "openarm_wifi_teleop/core/feedback_state_buffer.hpp"
 #include "openarm_wifi_teleop/safety/bilateral_gate.hpp"
+#include "openarm_wifi_teleop/control/bilateral_engager.hpp"
 #include "openarm_wifi_teleop/utils/link_check.hpp"
 #include "openarm_wifi_teleop/net/packet_codec.hpp"
 #include "openarm_wifi_teleop/control/runtime_control_server.hpp"
@@ -60,6 +62,13 @@ struct BilateralSettings {
     double eval_window_s = 1.0;
     double link_recheck_s = 1.0;
     openarm_wifi_teleop::safety::BilateralGateConfig gate;
+
+    // Phase 2: leader-side force rendering (config/leader.yaml: Bilateral).
+    bool render_enabled = false;                 // Bilateral.Enabled
+    std::vector<double> kp, kd, kf;              // 8 each (J1..J7 + gripper)
+    double engage_max_error_rad = 0.1;           // arm joints
+    double engage_max_error_gripper = 0.01;      // gripper [m]
+    openarm_wifi_teleop::control::BilateralEngager::Config engager;
 };
 
 static BilateralSettings load_bilateral_settings(const std::string& path) {
@@ -82,6 +91,20 @@ static BilateralSettings load_bilateral_settings(const std::string& path) {
         b.gate.max_rtt_p95_ms = cfg.get_double_or("BilateralLink", "MaxRttP95Ms", b.gate.max_rtt_p95_ms);
         b.gate.max_loss_percent = cfg.get_double_or("BilateralLink", "MaxLossPercent", b.gate.max_loss_percent);
         b.gate.require_follower_link_ok = cfg.get_bool_or("BilateralLink", "RequireFollowerLinkOk", b.gate.require_follower_link_ok);
+        if (cfg.has_node("Bilateral")) {
+            b.render_enabled = cfg.get_bool_or("Bilateral", "Enabled", false);
+            if (cfg.has("Bilateral", "Kp")) b.kp = cfg.get_vector("Bilateral", "Kp");
+            if (cfg.has("Bilateral", "Kd")) b.kd = cfg.get_vector("Bilateral", "Kd");
+            if (cfg.has("Bilateral", "Kf")) b.kf = cfg.get_vector("Bilateral", "Kf");
+            b.engage_max_error_rad = cfg.get_double_or("Bilateral", "EngageMaxErrorRad", b.engage_max_error_rad);
+            b.engage_max_error_gripper = cfg.get_double_or("Bilateral", "EngageMaxErrorGripper", b.engage_max_error_gripper);
+            b.engager.ramp_up_s = cfg.get_double_or("Bilateral", "RampUpS", b.engager.ramp_up_s);
+            b.engager.ramp_down_s = cfg.get_double_or("Bilateral", "RampDownS", b.engager.ramp_down_s);
+            if (b.render_enabled && (b.kp.size() < 8 || b.kd.size() < 8)) {
+                LOG_WARN("Bilateral.Kp/Kd need 8 values; leader force rendering disabled.");
+                b.render_enabled = false;
+            }
+        }
     } catch (const std::exception& e) {
         LOG_WARN("Bilateral feedback disabled: " << e.what());
         b.feedback_enabled = false;
@@ -244,6 +267,10 @@ int main(int argc, char** argv) {
     LOG_INFO("Binding to: " << bind_ip << " (Ports: " << local_port_r << ", " << local_port_l << ")");
     LOG_INFO("Mock mode: " << (mock ? "ON" : "OFF"));
 
+    // Bilateral settings are needed both for the controllers (gains) and the
+    // feedback/gate setup below.
+    BilateralSettings bi = load_bilateral_settings("config/leader.yaml");
+
     net::UdpSender sender_r(follower_ip, right_port, bind_ip, local_port_r);
     net::UdpSender sender_l(follower_ip, left_port, bind_ip, local_port_l);
     uint32_t seq = 0;
@@ -304,6 +331,7 @@ int main(int argc, char** argv) {
         control_r->SetParameter(leader_kp, leader_kd, leader_Fc, leader_k, leader_Fv, leader_Fo);
         control_r->SetGravityTrim(leader_gscale, leader_goffset);
         control_r->SetEffortLimits(leader_effort_limit);
+        if (bi.render_enabled) control_r->SetBilateralGains(bi.kp, bi.kd, bi.kf);
 
         dynamics_l = new Dynamics(left_urdf, "openarm_body_link0", "openarm_left_hand");
         if (!dynamics_l->Init()) {
@@ -328,6 +356,7 @@ int main(int argc, char** argv) {
         control_l->SetParameter(leader_kp, leader_kd, leader_Fc, leader_k, leader_Fv, leader_Fo);
         control_l->SetGravityTrim(leader_gscale, leader_goffset);
         control_l->SetEffortLimits(leader_effort_limit);
+        if (bi.render_enabled) control_l->SetBilateralGains(bi.kp, bi.kd, bi.kf);
 
         LOG_INFO("Adjusting position...");
         std::thread thread_r(&Control::AdjustPosition, control_r);
@@ -357,8 +386,13 @@ int main(int argc, char** argv) {
     }
 
     // --- Bilateral feedback receive + link gate ---
-    BilateralSettings bi = load_bilateral_settings("config/leader.yaml");
     safety::BilateralGate gate(bi.gate);
+    control::BilateralEngager engager_r(bi.engager);
+    control::BilateralEngager engager_l(bi.engager);
+    // Last usable follower state per side, kept for the release ramp when the
+    // feedback goes stale mid-engagement.
+    LeaderBilateralCommand bcmd_r, bcmd_l;
+    std::mutex engager_mutex;  // engager state is read by the control thread for status
     core::FeedbackStateBuffer fb_buffer_r(bi.eval_window_s);
     core::FeedbackStateBuffer fb_buffer_l(bi.eval_window_s);
     std::unique_ptr<net::UdpReceiver> fb_receiver_r, fb_receiver_l;
@@ -447,7 +481,15 @@ int main(int argc, char** argv) {
         std::string j = "\"bilateral\":{";
         j += "\"feedback_enabled\":" + std::string(bi.feedback_enabled ? "true" : "false") + ",";
         j += "\"requested\":" + std::string(bilateral_requested ? "true" : "false") + ",";
-        j += "\"engaged\":false,";  // Phase 2: true when feedback torque is applied to the leader
+        {
+            std::lock_guard<std::mutex> lock(engager_mutex);
+            j += "\"render_enabled\":" + std::string(bi.render_enabled ? "true" : "false") + ",";
+            j += "\"engaged\":" + std::string((engager_r.engaged() && engager_l.engaged()) ? "true" : "false") + ",";
+            j += "\"state_right\":\"" + std::string(engager_r.state_name()) + "\",";
+            j += "\"state_left\":\"" + std::string(engager_l.state_name()) + "\",";
+            j += "\"scale_right\":" + fmt2(engager_r.scale()) + ",";
+            j += "\"scale_left\":" + fmt2(engager_l.scale()) + ",";
+        }
         j += "\"gate_ok\":" + std::string(g.ok ? "true" : "false") + ",";
         j += "\"gate_reasons\":\"" + control::json_escape(g.reasons_joined()) + "\",";
         j += "\"peer_ip\":\"" + control::json_escape(bi.peer_ip) + "\",";
@@ -455,6 +497,35 @@ int main(int argc, char** argv) {
         j += "\"link_reasons\":\"" + control::json_escape(link_reasons) + "\",";
         j += "\"right\":" + feedback_stats_json(fb_buffer_r.snapshot(), hr ? &lr : nullptr) + ",";
         j += "\"left\":" + feedback_stats_json(fb_buffer_l.snapshot(), hl ? &ll : nullptr);
+        j += "}";
+        return j;
+    };
+
+    // Compact form for the GUI's 1 Hz status poll.
+    auto bilateral_summary_json = [&]() {
+        auto g = evaluate_gate();
+        auto sr = fb_buffer_r.snapshot();
+        auto sl = fb_buffer_l.snapshot();
+        std::string state_r, state_l;
+        bool engaged = false;
+        {
+            std::lock_guard<std::mutex> lock(engager_mutex);
+            state_r = engager_r.state_name();
+            state_l = engager_l.state_name();
+            engaged = engager_r.engaged() && engager_l.engaged();
+        }
+        std::string j = "\"bilateral\":{";
+        j += "\"feedback_enabled\":" + std::string(bi.feedback_enabled ? "true" : "false") + ",";
+        j += "\"render_enabled\":" + std::string(bi.render_enabled ? "true" : "false") + ",";
+        j += "\"requested\":" + std::string(bilateral_requested ? "true" : "false") + ",";
+        j += "\"engaged\":" + std::string(engaged ? "true" : "false") + ",";
+        j += "\"state_right\":\"" + state_r + "\",";
+        j += "\"state_left\":\"" + state_l + "\",";
+        j += "\"gate_ok\":" + std::string(g.ok ? "true" : "false") + ",";
+        j += "\"gate_reasons\":\"" + control::json_escape(g.reasons_joined()) + "\",";
+        j += "\"rtt_p95_ms\":" + fmt2(std::max(sr.rtt_p95_ms, sl.rtt_p95_ms)) + ",";
+        j += "\"rate_hz\":" + fmt2(std::min(sr.rate_hz, sl.rate_hz)) + ",";
+        j += "\"loss_percent\":" + fmt2(std::max(sr.loss_percent, sl.loss_percent));
         j += "}";
         return j;
     };
@@ -472,7 +543,7 @@ int main(int argc, char** argv) {
                 return control::json_error("bilateral refused: " + g.reasons_joined());
             }
             bilateral_requested = true;
-            LOG_INFO("Bilateral requested (gate ok).");
+            LOG_INFO("Bilateral requested (gate ok)" << (bi.render_enabled ? "." : "; Bilateral.Enabled is false, feedback only."));
             return control::json_ok("\"message\":\"bilateral requested\"," + bilateral_status_json());
         });
         runtime_control->register_handler("bilateral_disable", [&](const std::string&) {
@@ -493,7 +564,8 @@ int main(int argc, char** argv) {
                 "\"init_in_progress\":" + std::string(init_position_in_progress ? "true" : "false") + ","
                 "\"goto_in_progress\":" + std::string(goto_pose_in_progress ? "true" : "false") + ","
                 "\"running\":" + std::string(keep_running ? "true" : "false") + ","
-                "\"bilateral_requested\":" + std::string(bilateral_requested ? "true" : "false")
+                "\"bilateral_requested\":" + std::string(bilateral_requested ? "true" : "false") + ","
+                + bilateral_summary_json()
             );
         });
         runtime_control->register_handler("disable", [&](const std::string&) {
@@ -577,8 +649,48 @@ int main(int argc, char** argv) {
         std::memset(&pkt_l, 0, sizeof(pkt_l));
 
         if (!mock) {
-            control_r->unilateral_step();
-            control_l->unilateral_step();
+            // Phase 2: per-arm engage/release and leader force rendering.
+            // want   = requested && fresh feedback from an ACTIVE follower
+            // aligned = leader/follower pose error within tolerance (engage only)
+            auto step_side = [&](Control* control, std::shared_ptr<RobotSystemState>& state,
+                                 core::FeedbackStateBuffer& buf, control::BilateralEngager& engager,
+                                 LeaderBilateralCommand& bcmd, const char* name) {
+                net::FeedbackPacket fb;
+                bool has = buf.get_latest(fb);
+                auto st = buf.snapshot();
+                bool fresh = has && st.age_ms >= 0.0 && st.age_ms <= bi.gate.max_feedback_age_ms;
+                bool want = bi.render_enabled && bilateral_requested && fresh && fb.enabled && !fb.estop;
+
+                bool aligned = false;
+                if (fresh) {
+                    auto arm = state->arm_state().get_all_responses();
+                    auto hand = state->hand_state().get_all_responses();
+                    aligned = arm.size() <= fb.arm_dof && hand.size() <= fb.hand_dof;
+                    for (size_t i = 0; aligned && i < arm.size(); ++i)
+                        aligned = std::fabs(arm[i].position - fb.arm_pos[i]) <= bi.engage_max_error_rad;
+                    for (size_t i = 0; aligned && i < hand.size(); ++i)
+                        aligned = std::fabs(hand[i].position - fb.hand_pos[i]) <= bi.engage_max_error_gripper;
+
+                    bcmd.arm_pos_ref.assign(fb.arm_pos, fb.arm_pos + fb.arm_dof);
+                    bcmd.hand_pos_ref.assign(fb.hand_pos, fb.hand_pos + fb.hand_dof);
+                    bcmd.arm_tau_f.assign(fb.arm_tau, fb.arm_tau + fb.arm_dof);
+                    bcmd.hand_tau_f.assign(fb.hand_tau, fb.hand_tau + fb.hand_dof);
+                }
+
+                const char* before;
+                {
+                    std::lock_guard<std::mutex> lock(engager_mutex);
+                    before = engager.state_name();
+                    engager.update(want, aligned, 1.0 / rate_hz);
+                    bcmd.scale = engager.scale();
+                    if (std::strcmp(before, engager.state_name()) != 0) {
+                        LOG_INFO("[" << name << "] bilateral " << before << " -> " << engager.state_name());
+                    }
+                }
+                control->leader_step(engager.active() ? &bcmd : nullptr);
+            };
+            step_side(control_r, state_r, fb_buffer_r, engager_r, bcmd_r, "RIGHT");
+            step_side(control_l, state_l, fb_buffer_l, engager_l, bcmd_l, "LEFT");
 
             auto arm_res_r = state_r->arm_state().get_all_responses();
             auto hand_res_r = state_r->hand_state().get_all_responses();
