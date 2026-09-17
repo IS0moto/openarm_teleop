@@ -9,8 +9,15 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <functional>
+#include <algorithm>
+#include <cstring>
 
 #include "openarm_wifi_teleop/net/udp_receiver.hpp"
+#include "openarm_wifi_teleop/net/udp_sender.hpp"
+#include "openarm_wifi_teleop/net/packet_codec.hpp"
+#include "openarm_wifi_teleop/net/feedback_packet.hpp"
+#include "openarm_wifi_teleop/utils/link_check.hpp"
 #include "openarm_wifi_teleop/core/teleop_state_buffer.hpp"
 #include "openarm_wifi_teleop/safety/safety_manager.hpp"
 #include "openarm_wifi_teleop/safety/rate_limiter.hpp"
@@ -51,6 +58,81 @@ static bool parse_pose16(const std::string& args, std::vector<double>& out) {
 }
 core::TeleopStateBuffer state_buffer_r;
 core::TeleopStateBuffer state_buffer_l;
+
+// Bilateral feedback settings (config/follower.yaml: BilateralFeedback / BilateralLink).
+struct FeedbackSettings {
+    bool enabled = false;
+    std::string target_ip = "127.0.0.1";
+    uint16_t right_port = 50400;
+    uint16_t left_port = 50401;
+    bool require_wired = true;
+    bool allow_loopback = false;
+    int min_link_speed_mbps = 100;
+    double link_recheck_s = 1.0;
+};
+
+static FeedbackSettings load_feedback_settings(const std::string& path) {
+    FeedbackSettings fs;
+    try {
+        YamlLoader cfg(path);
+        if (!cfg.has_node("BilateralFeedback")) return fs;
+        fs.enabled = cfg.get_bool_or("BilateralFeedback", "Enabled", false);
+        fs.target_ip = cfg.get_string_or("BilateralFeedback", "TargetIp", fs.target_ip);
+        fs.right_port = static_cast<uint16_t>(cfg.get_int_or("BilateralFeedback", "RightPort", fs.right_port));
+        fs.left_port = static_cast<uint16_t>(cfg.get_int_or("BilateralFeedback", "LeftPort", fs.left_port));
+        fs.require_wired = cfg.get_bool_or("BilateralLink", "RequireWired", fs.require_wired);
+        fs.allow_loopback = cfg.get_bool_or("BilateralLink", "AllowLoopback", fs.allow_loopback);
+        fs.min_link_speed_mbps = cfg.get_int_or("BilateralLink", "MinLinkSpeedMbps", fs.min_link_speed_mbps);
+        fs.link_recheck_s = cfg.get_double_or("BilateralLink", "RecheckIntervalS", fs.link_recheck_s);
+    } catch (const std::exception& e) {
+        LOG_WARN("Bilateral feedback disabled: " << e.what());
+        fs.enabled = false;
+    }
+    return fs;
+}
+
+// Follower-side link check: the feedback target is the arbiter PC, i.e. the
+// physical peer, so the interface routing to it is the one that matters.
+static bool follower_link_ok(const FeedbackSettings& fs, utils::LinkInfo& info) {
+    info = utils::query_link_to(fs.target_ip);
+    if (!info.resolved) return false;
+    if (info.is_loopback) return fs.allow_loopback;
+    if (!fs.require_wired) return true;
+    return !info.is_wireless && info.has_device && info.carrier &&
+           info.speed_mbps >= fs.min_link_speed_mbps;
+}
+
+// Build one arm's feedback packet from the measured joint state.
+static void fill_feedback(net::FeedbackPacket& fb, net::ArmSide side, uint8_t mode,
+                          safety::SafetyState st, bool link_ok,
+                          const net::TeleopPacket* cmd, uint64_t cmd_recv_time_ns,
+                          const std::vector<JointState>& arm, const std::vector<JointState>& hand) {
+    std::memset(&fb, 0, sizeof(fb));
+    fb.arm_side = static_cast<uint8_t>(side);
+    fb.mode = mode;
+    fb.enabled = (st == safety::SafetyState::ACTIVE) ? 1 : 0;
+    fb.estop = (st == safety::SafetyState::ESTOP) ? 1 : 0;
+    fb.safety_state = static_cast<uint8_t>(st);
+    fb.link_ok = link_ok ? 1 : 0;
+    if (cmd) {
+        fb.echo_cmd_seq = cmd->seq;
+        fb.echo_cmd_send_time_ns = cmd->send_time_ns;
+        uint64_t now = utils::now_ns();
+        fb.cmd_hold_ns = (now >= cmd_recv_time_ns) ? now - cmd_recv_time_ns : 0;
+    }
+    fb.arm_dof = static_cast<uint8_t>(std::min<size_t>(arm.size(), 8));
+    fb.hand_dof = static_cast<uint8_t>(std::min<size_t>(hand.size(), 4));
+    for (size_t i = 0; i < fb.arm_dof; ++i) {
+        fb.arm_pos[i] = arm[i].position;
+        fb.arm_vel[i] = arm[i].velocity;
+        fb.arm_tau[i] = arm[i].effort;
+    }
+    for (size_t i = 0; i < fb.hand_dof; ++i) {
+        fb.hand_pos[i] = hand[i].position;
+        fb.hand_vel[i] = hand[i].velocity;
+        fb.hand_tau[i] = hand[i].effort;
+    }
+}
 std::unique_ptr<safety::SafetyManager> safety_mgr_r;
 std::unique_ptr<safety::SafetyManager> safety_mgr_l;
 
@@ -188,6 +270,9 @@ int main(int argc, char** argv) {
     safety_mgr_r = std::make_unique<safety::SafetyManager>(safety_config, "RIGHT");
     safety_mgr_l = std::make_unique<safety::SafetyManager>(safety_config, "LEFT");
 
+    // Filled in once the feedback path is set up; read by the status handler.
+    std::function<std::string()> feedback_status_json = [] { return std::string("\"feedback\":{\"enabled\":false}"); };
+
     std::unique_ptr<control::RuntimeControlServer> runtime_control;
     if (control_port > 0) {
         runtime_control = std::make_unique<control::RuntimeControlServer>(control_bind_ip, control_port);
@@ -203,7 +288,8 @@ int main(int argc, char** argv) {
                 "\"goto_in_progress\":" + std::string(goto_pose_in_progress ? "true" : "false") + ","
                 "\"recover_requested\":" + std::string(recover_estop_requested ? "true" : "false") + ","
                 "\"recover_in_progress\":" + std::string(recover_estop_in_progress ? "true" : "false") + ","
-                "\"running\":" + std::string(keep_running ? "true" : "false")
+                "\"running\":" + std::string(keep_running ? "true" : "false") + ","
+                + feedback_status_json()
             );
         });
         runtime_control->register_handler("init_position", [&](const std::string&) {
@@ -269,6 +355,38 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- Bilateral feedback (follower -> arbiter -> leader) ---
+    FeedbackSettings fb_settings = load_feedback_settings("config/follower.yaml");
+    std::unique_ptr<net::UdpSender> fb_sender_r, fb_sender_l;
+    utils::LinkInfo fb_link;
+    bool fb_link_ok = false;
+    uint32_t fb_seq = 0;
+    auto next_link_check = std::chrono::steady_clock::now();
+    if (fb_settings.enabled) {
+        fb_sender_r = std::make_unique<net::UdpSender>(fb_settings.target_ip, fb_settings.right_port);
+        fb_sender_l = std::make_unique<net::UdpSender>(fb_settings.target_ip, fb_settings.left_port);
+        fb_link_ok = follower_link_ok(fb_settings, fb_link);
+        LOG_INFO("Bilateral feedback -> " << fb_settings.target_ip << ":" << fb_settings.right_port
+                 << "/" << fb_settings.left_port << " link=" << fb_link.describe()
+                 << " link_ok=" << (fb_link_ok ? "true" : "false"));
+        if (!fb_link_ok) {
+            LOG_WARN("Follower link check failed; feedback will carry link_ok=0 and the leader will refuse bilateral.");
+        }
+    }
+    feedback_status_json = [&]() {
+        return std::string("\"feedback\":{")
+            + "\"enabled\":" + (fb_settings.enabled ? "true" : "false") + ","
+            + "\"target_ip\":\"" + control::json_escape(fb_settings.target_ip) + "\","
+            + "\"right_port\":" + std::to_string(fb_settings.right_port) + ","
+            + "\"left_port\":" + std::to_string(fb_settings.left_port) + ","
+            + "\"link_ok\":" + (fb_link_ok ? "true" : "false") + ","
+            + "\"link\":\"" + control::json_escape(fb_link.describe()) + "\","
+            + "\"sent\":" + std::to_string(fb_seq) + "}";
+    };
+
+    bool follower_gravity_ff = false;
+    double follower_gravity_ff_scale = 1.0;
+
     openarm::can::socket::OpenArm* follower_arm_r = nullptr;
     openarm::can::socket::OpenArm* follower_arm_l = nullptr;
     Dynamics* dynamics_r = nullptr;
@@ -291,6 +409,11 @@ int main(int argc, char** argv) {
         auto follower_k = follower_loader.get_vector("FollowerArmParam", "k");
         auto follower_Fv = follower_loader.get_vector("FollowerArmParam", "Fv");
         auto follower_Fo = follower_loader.get_vector("FollowerArmParam", "Fo");
+        // Bilateral: model-gravity feedforward while the incoming command is BILATERAL.
+        follower_gravity_ff = follower_loader.get_bool_or("FollowerArmParam", "GravityFeedforward", false);
+        follower_gravity_ff_scale = follower_loader.get_double_or("FollowerArmParam", "GravityFeedforwardScale", 1.0);
+        LOG_INFO("Follower gravity feedforward in bilateral: " << (follower_gravity_ff ? "on" : "off")
+                 << " scale=" << follower_gravity_ff_scale);
 
         // Right
         dynamics_r = new Dynamics(right_urdf, "openarm_body_link0", "openarm_right_hand");
@@ -465,6 +588,9 @@ int main(int argc, char** argv) {
                     }
                     state_r->arm_state().set_all_references(arm_refs);
                     state_r->hand_state().set_all_references(hand_refs);
+                    control_r->SetFollowerGravityFeedforward(
+                        follower_gravity_ff && target_r.mode == static_cast<uint8_t>(net::ControlMode::BILATERAL),
+                        follower_gravity_ff_scale);
                 }
                 control_r->unilateral_step();
             } else if (state_r_st == safety::SafetyState::HOLD) {
@@ -495,6 +621,9 @@ int main(int argc, char** argv) {
                     }
                     state_l->arm_state().set_all_references(arm_refs);
                     state_l->hand_state().set_all_references(hand_refs);
+                    control_l->SetFollowerGravityFeedforward(
+                        follower_gravity_ff && target_l.mode == static_cast<uint8_t>(net::ControlMode::BILATERAL),
+                        follower_gravity_ff_scale);
                 }
                 control_l->unilateral_step();
             } else if (state_l_st == safety::SafetyState::HOLD) {
@@ -505,6 +634,52 @@ int main(int argc, char** argv) {
         }
 
         auto now = std::chrono::steady_clock::now();
+
+        if (fb_settings.enabled) {
+            if (now >= next_link_check) {
+                bool ok = follower_link_ok(fb_settings, fb_link);
+                if (ok != fb_link_ok) {
+                    LOG_WARN("Follower link check changed: link_ok=" << (ok ? "true" : "false")
+                             << " (" << fb_link.describe() << ")");
+                }
+                fb_link_ok = ok;
+                next_link_check = now + std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(fb_settings.link_recheck_s));
+            }
+
+            std::vector<JointState> arm_r, hand_r, arm_l, hand_l;
+            if (!mock && state_r && state_l) {
+                arm_r = state_r->arm_state().get_all_responses();
+                hand_r = state_r->hand_state().get_all_responses();
+                arm_l = state_l->arm_state().get_all_responses();
+                hand_l = state_l->hand_state().get_all_responses();
+            } else {
+                // Mock: echo the command so the leader-side loop can be exercised end to end.
+                auto echo = [](const net::TeleopPacket& t, bool has, std::vector<JointState>& arm, std::vector<JointState>& hand) {
+                    if (!has) return;
+                    arm.resize(t.arm_dof);
+                    hand.resize(t.hand_dof);
+                    for (size_t i = 0; i < arm.size() && i < 8; ++i) arm[i] = {t.arm_pos[i], t.arm_vel[i], 0.0};
+                    for (size_t i = 0; i < hand.size() && i < 4; ++i) hand[i] = {t.hand_pos[i], t.hand_vel[i], 0.0};
+                };
+                echo(target_r, has_r, arm_r, hand_r);
+                echo(target_l, has_l, arm_l, hand_l);
+            }
+
+            net::FeedbackPacket fb_r, fb_l;
+            fill_feedback(fb_r, net::ArmSide::RIGHT, has_r ? target_r.mode : 0, state_r_st, fb_link_ok,
+                          has_r ? &target_r : nullptr, state_buffer_r.get_last_receive_time_ns(), arm_r, hand_r);
+            fill_feedback(fb_l, net::ArmSide::LEFT, has_l ? target_l.mode : 0, state_l_st, fb_link_ok,
+                          has_l ? &target_l : nullptr, state_buffer_l.get_last_receive_time_ns(), arm_l, hand_l);
+            fb_r.seq = fb_seq;
+            fb_l.seq = fb_seq;
+            fb_seq++;
+            net::PacketCodec::encode(fb_r);
+            net::PacketCodec::encode(fb_l);
+            fb_sender_r->send_raw(&fb_r, sizeof(fb_r));
+            fb_sender_l->send_raw(&fb_l, sizeof(fb_l));
+        }
+
         if (now - print_time > std::chrono::seconds(1)) {
             LOG_DEBUG("Status [R: " << safety_state_to_str(state_r_st) << ", Loss: " << state_buffer_r.get_lost_packet_count()
                       << " | L: " << safety_state_to_str(state_l_st) << ", Loss: " << state_buffer_l.get_lost_packet_count() << "]");

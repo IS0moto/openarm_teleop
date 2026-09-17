@@ -43,3 +43,59 @@ LeaderArmParam:
   # ---------------------------------------------------------
   GravityScale:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8, 1.0]
   GravityOffset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07, 0.0]
+
+  # ---------------------------------------------------------
+  # Per-joint |tau| cap [Nm] on every torque the LEADER sends (J1..J7 + gripper).
+  # Non-finite values become 0 first. Defaults when omitted: 20 Nm for the arm
+  # joints (effort_limit_L), 2 Nm for the gripper.
+  # ---------------------------------------------------------
+  EffortLimit: [20.0, 20.0, 12.0, 12.0, 5.0, 5.0, 5.0, 2.0]
+
+  # ---------------------------------------------------------
+  # Bilateral. The leader receives follower state (q, dq, tau) via the Arbiter
+  # (BilateralFeedback), allows `bilateral_enable` only while every gate
+  # condition holds (BilateralLink), and renders force on the leader arms
+  # (Bilateral) while engaged.
+  # ---------------------------------------------------------
+Bilateral:
+  # Leader-side force rendering (Phase 2). false = feedback/gate only.
+  Enabled: true
+  # Software PD on the leader, dq_ref = 0:
+  #   tau = Kp*(q_follower - q_leader) - Kd*dq_leader - Kf*(tau_follower - g(q_follower))
+  # then gravity/friction comp is added and EffortLimit is applied.
+  # Start low; round trip measured at ~3 ms p95 on the wired link.
+  # Gripper gains are in motor units (Nm/rad), like FollowerArmParam.
+  Kp: [60.0, 60.0, 60.0, 60.0, 8.0, 10.0, 8.0, 5.0]
+  Kd: [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2, 0.2]
+  # Force channel gain (0 = position-position only). Follower measured torque
+  # minus model gravity at the follower pose, so only contact is rendered.
+  Kf: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  # Engage only when every joint is within this error of the follower, then
+  # ramp the gains up over RampUpS. Release ramps down over RampDownS.
+  EngageMaxErrorRad: 0.1
+  EngageMaxErrorGripper: 0.01
+  RampUpS: 0.5
+  RampDownS: 0.1
+
+BilateralFeedback:
+  Enabled: true
+  BindIp: 0.0.0.0
+  RightPort: 50500        # Arbiter -> leader feedback (right)
+  LeftPort: 50501         # Arbiter -> leader feedback (left)
+
+BilateralLink:
+  # Physical peer (follower PC). The interface that routes to this host is
+  # checked, not the Arbiter's loopback address.
+  PeerIp: 192.168.2.100
+  RequireWired: true      # reject wireless and virtual interfaces
+  AllowLoopback: false    # set true only for --mock loopback tests
+  MinLinkSpeedMbps: 100
+  RecheckIntervalS: 1.0
+  # Feedback quality, evaluated over EvalWindowS and re-checked every 100 ms
+  # while bilateral is requested. Any failure drops back to unilateral.
+  EvalWindowS: 1.0
+  MinFeedbackRateHz: 400.0
+  MaxFeedbackAgeMs: 20.0
+  MaxRttP95Ms: 8.0        # leader cmd send -> feedback receive (includes follower hold)
+  MaxLossPercent: 1.0
+  RequireFollowerLinkOk: true

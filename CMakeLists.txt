@@ -71,13 +71,16 @@ add_library(openarm_wifi_teleop_lib STATIC
     src/net/packet_codec.cpp
     src/utils/network.cpp
     src/utils/logging.cpp
+    src/utils/link_check.cpp
     src/telemetry/openarm_telemetry_publisher.cpp
     src/ik/openarm_pinocchio_ik.cpp
     src/control/runtime_control_server.cpp
     src/safety/watchdog.cpp
     src/safety/rate_limiter.cpp
     src/safety/safety_manager.cpp
+    src/safety/bilateral_gate.cpp
     src/core/teleop_state_buffer.cpp
+    src/core/feedback_state_buffer.cpp
 )
 
 target_link_libraries(openarm_wifi_teleop_lib PUBLIC 
@@ -107,3 +110,25 @@ add_wifi_teleop_app(wifi_single_follower src/apps/wifi_single_follower.cpp)
 
 add_executable(telemetry_fanout tools/telemetry_fanout.cpp)
 add_executable(udp_fanout tools/udp_fanout.cpp)
+
+# -----------------------------
+# Tests (optional, needs GTest)
+# -----------------------------
+option(BUILD_TESTING "Build unit tests" OFF)
+if(BUILD_TESTING)
+    find_package(GTest REQUIRED)
+    enable_testing()
+    add_executable(test_feedback_codec tests/test_feedback_codec.cpp)
+    target_link_libraries(test_feedback_codec PRIVATE openarm_wifi_teleop_lib GTest::gtest GTest::gtest_main pthread)
+    add_test(NAME test_feedback_codec COMMAND test_feedback_codec)
+    add_executable(test_bilateral_gate tests/test_bilateral_gate.cpp)
+    target_link_libraries(test_bilateral_gate PRIVATE openarm_wifi_teleop_lib GTest::gtest GTest::gtest_main pthread)
+    add_test(NAME test_bilateral_gate COMMAND test_bilateral_gate)
+    add_executable(test_control_friction tests/test_control_friction.cpp)
+    target_link_libraries(test_control_friction PRIVATE openarm_wifi_teleop_lib GTest::gtest GTest::gtest_main pthread)
+    add_test(NAME test_control_friction COMMAND test_control_friction)
+    add_executable(test_bilateral_engager tests/test_bilateral_engager.cpp)
+    target_link_libraries(test_bilateral_engager PRIVATE GTest::gtest GTest::gtest_main pthread)
+    target_include_directories(test_bilateral_engager PRIVATE include)
+    add_test(NAME test_bilateral_engager COMMAND test_bilateral_engager)
+endif()

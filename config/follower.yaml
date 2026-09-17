@@ -32,3 +32,27 @@ FollowerArmParam:
   k:  [28.417,  28.417,  29.065,  130.038, 151.771, 242.287, 7.888,  4.000]
   Fv: [0.063,    0.0630,   0.604,   0.813,   0.029,   0.072,  0.084,  0.084]
   Fo: [0.088,    0.088,   0.008,  -0.058,   0.005,   0.009, -0.059, -0.050]
+
+  # Bilateral only (command mode == BILATERAL): add model gravity as MIT tau
+  # feedforward so the follower does not sag by gravity/Kp -- that sag is the
+  # steady-state error the leader would otherwise feel as a constant force.
+  # Clamped to effort_limit_F. Ignored in unilateral/AI/VR.
+  GravityFeedforward: true
+  GravityFeedforwardScale: 1.0
+
+  # ---------------------------------------------------------
+  # Bilateral feedback (follower -> Arbiter -> leader), 1 packet per control
+  # cycle per arm with measured q, dq, tau. TargetIp is the Arbiter PC, i.e.
+  # the physical peer used for the follower-side link check.
+  # ---------------------------------------------------------
+BilateralFeedback:
+  Enabled: true
+  TargetIp: 192.168.2.102
+  RightPort: 50400        # Arbiter feedback input (right)
+  LeftPort: 50401         # Arbiter feedback input (left)
+
+BilateralLink:
+  RequireWired: true
+  AllowLoopback: false    # set true only for --mock loopback tests
+  MinLinkSpeedMbps: 100
+  RecheckIntervalS: 1.0

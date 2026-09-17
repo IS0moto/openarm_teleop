@@ -14,7 +14,8 @@ enum class ArmSide : uint8_t {
 };
 
 enum class ControlMode : uint8_t {
-    UNILATERAL = 0
+    UNILATERAL = 0,
+    BILATERAL = 1   // leader requests follower feedback (see feedback_packet.hpp)
 };
 
 #pragma pack(push, 1)
@@ -27,7 +28,7 @@ struct TeleopPacket {
     uint64_t send_time_ns;
 
     uint8_t arm_side;        // 0: right, 1: left
-    uint8_t mode;            // 0: unilateral
+    uint8_t mode;            // 0: unilateral, 1: bilateral
     uint8_t enable;          // 0/1
     uint8_t estop;           // 0/1
 

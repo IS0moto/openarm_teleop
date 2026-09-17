@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <cstring>
 #include <cerrno>
 
@@ -91,6 +92,21 @@ void UdpReceiver::receive_loop() {
     socklen_t client_len = sizeof(client_addr);
 
     while (running_) {
+        // Block in poll() instead of sleeping 1 ms between polls: the sleep added
+        // up to 1 ms of latency per hop, which matters for the bilateral loop.
+        struct pollfd pfd;
+        pfd.fd = socket_fd_;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int ready = poll(&pfd, 1, 10);
+        if (ready <= 0) {
+            if (ready < 0 && errno != EINTR) {
+                LOG_ERROR("poll error: " << strerror(errno));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            continue;
+        }
+
         ssize_t recv_bytes = recvfrom(socket_fd_, buffer, sizeof(buffer), 0,
                                       (struct sockaddr*)&client_addr, &client_len);
 
@@ -111,13 +127,9 @@ void UdpReceiver::receive_loop() {
                     invalid_count_++;
                 }
             }
-        } else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            } else {
-                LOG_ERROR("recvfrom error: " << strerror(errno));
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
+        } else if (recv_bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            LOG_ERROR("recvfrom error: " << strerror(errno));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
 }

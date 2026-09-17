@@ -28,6 +28,16 @@
 #include <robot_state.hpp>
 #include <utility>
 
+// Leader-side bilateral command for one control cycle: the follower's measured
+// state to render as force, plus the engage ramp scale (0 = gravity comp only).
+struct LeaderBilateralCommand {
+    std::vector<double> arm_pos_ref;   // follower joint positions [rad]
+    std::vector<double> hand_pos_ref;  // follower gripper positions [m]
+    std::vector<double> arm_tau_f;     // follower measured joint torque [Nm]
+    std::vector<double> hand_tau_f;    // follower measured gripper torque [Nm]
+    double scale = 0.0;                // 0..1 gain ramp
+};
+
 class Control {
     openarm::can::socket::OpenArm *openarm_;
 
@@ -75,6 +85,16 @@ public:
     // Per-joint gravity-comp trim (leader). grav_cmd[i] = gravity[i]*gscale_[i] + goffset_[i].
     // Empty => identity (scale 1.0, offset 0.0).
     std::vector<double> gscale_, goffset_;
+    std::vector<double> effort_limit_;
+    bool leader_first_cycle_logged_ = false;
+
+    // Leader bilateral gains (software PD on the leader, dq_ref = 0) and force
+    // channel gain Kf (0 = position-position only). Empty => bilateral disabled.
+    std::vector<double> bkp_, bkd_, bkf_;
+    // Follower: add model gravity as MIT tau feedforward (set per cycle by the app
+    // while the incoming command is BILATERAL; reduces the sag the leader feels).
+    bool follower_gravity_ff_ = false;
+    double follower_gravity_ff_scale_ = 1.0;
 
     // bool Setup(void);
     void Setstate(int state);
@@ -86,6 +106,15 @@ public:
 
     void SetGravityTrim(const std::vector<double> &scale, const std::vector<double> &offset);
 
+    // Per-joint |tau| limit applied to every torque the LEADER sends (arm J1..J7 +
+    // gripper). Defaults to effort_limit_L with a smaller gripper limit; the human
+    // is in contact with this arm, so nothing may bypass it.
+    void SetEffortLimits(const std::vector<double> &limits);
+
+    void SetBilateralGains(const std::vector<double> &Kp, const std::vector<double> &Kd,
+                           const std::vector<double> &Kf);
+    void SetFollowerGravityFeedforward(bool enabled, double scale = 1.0);
+
     bool AdjustPosition(void);
 
     // Interpolate to an arbitrary target pose (arm joints + grippers).
@@ -95,6 +124,9 @@ public:
     // Compute torque based on bilateral
     bool bilateral_step();
     bool unilateral_step();
+    // Leader control cycle. cmd == nullptr: gravity/friction comp only (unilateral).
+    // Otherwise adds scale * (Kp(q_f - q) - Kd dq - Kf tau_ext), clamped.
+    bool leader_step(const LeaderBilateralCommand *cmd);
 
     // NOTE! Control() class operates on "joints", while the underlying
     // classes operates on "actuators". The following functions map
@@ -106,6 +138,13 @@ public:
 
     // void ComputeFriction(const double *velocity, double *friction);
     void ComputeFriction(const double *velocity, double *friction, size_t index);
+    // Friction for arm + gripper joints into friction[0 .. arm+gripper). The two
+    // velocity vectors are concatenated first so every index stays in bounds.
+    void ComputeAllFriction(const std::vector<double> &arm_velocity,
+                            const std::vector<double> &gripper_velocity,
+                            std::vector<double> &friction);
+    // Non-finite -> 0, then clamp to effort_limit_[index].
+    double ClampLeaderEffort(size_t index, double tau) const;
     void ComputeGravity(const double *position, double *gravity);
     bool DetectVibration(const double *velocity, bool *what_axis);
 };

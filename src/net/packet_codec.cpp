@@ -48,3 +48,34 @@ bool PacketCodec::decode_and_validate(TeleopPacket& packet) {
 
 }
 }
+
+namespace openarm_wifi_teleop {
+namespace net {
+
+void PacketCodec::encode(FeedbackPacket& packet) {
+    packet.magic = FEEDBACK_MAGIC;
+    packet.version = FEEDBACK_VERSION;
+    packet.packet_size = sizeof(FeedbackPacket);
+    packet.send_time_ns = openarm_wifi_teleop::utils::system_now_ns();
+    packet.crc32 = 0;
+
+    packet.crc32 = calculate_crc32(reinterpret_cast<const uint8_t*>(&packet),
+                                   sizeof(FeedbackPacket) - sizeof(uint32_t));
+}
+
+bool PacketCodec::decode_and_validate(FeedbackPacket& packet) {
+    if (packet.magic != FEEDBACK_MAGIC) return false;
+    if (packet.version != FEEDBACK_VERSION) return false;
+    if (packet.packet_size != sizeof(FeedbackPacket)) return false;
+
+    uint32_t received_crc = packet.crc32;
+    packet.crc32 = 0;
+    uint32_t calculated_crc = calculate_crc32(reinterpret_cast<const uint8_t*>(&packet),
+                                              sizeof(FeedbackPacket) - sizeof(uint32_t));
+    packet.crc32 = received_crc;
+
+    return calculated_crc == received_crc;
+}
+
+}
+}
